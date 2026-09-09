@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V1.00 Chemistry Quiz Analyzer</title>
+    <title>V1.01 Chemistry Quiz Analyzer</title>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -4580,27 +4580,32 @@ ${getSyllabusTableText()}
 - 請用中文輸出：「淺」「中」「深」。
 
 五、topicId 和 topicDesc
-- topicId：請根據題目內容，與上方【課程大綱對照表】進行比對，找出最相關的課題編號（例如 1.1.1, 4.5.2）。若無法找到精確對應，請選擇最接近的一個。若完全無法對應，topicId 可留空。
+- topicId：請根據題目內容，與上方【課程大綱對照表】進行比對，找出最相關的課題編號（例如 1.1.1, 4.1.2）。若無法找到精確對應，請選擇最接近的一個。若完全無法對應，topicId 可留空。
 - topicDesc：不要直接抄寫對照表中的學習要求文字。請你根據該題目實際問的內容，用中文撰寫一個 20-30 字的簡短描述，說明這題在考什麼。
-  例：「計算長直載流導線在距離其 6 cm 處所產生的磁場量值。」
+  例：「根據反應物與生成物，判斷氧化還原反應中的氧化劑。」
   維持一句話，簡潔準確。
 
-六、答案欄
-- 全部留空，只需輸出一個 Tab 符號作結。
+六、正確答案（ans）★ 必須填寫
+- MC 題：必須填寫正確選項代號（A / B / C / D），統一使用大寫。
+- 若題目有多個正確答案，用逗號分隔（例如 A,C）。
+- LQ 題：本欄留空（僅輸出 Tab 分隔符）。
+- 若上傳檔案中未能直接看到答案，請根據化學知識自行判斷最合理的正確選項並填上。
 
 【輸出格式】
 每一行代表一題，欄位以 Tab 分隔，順序為：
-題目ID [Tab] 題型 [Tab] 滿分 [Tab] 深淺度 [Tab] topicId [Tab] topicDesc [Tab] [空]
+題目ID [Tab] 題型 [Tab] 滿分 [Tab] 深淺度 [Tab] topicId [Tab] topicDesc [Tab] 正確答案
 
 例如：
-MC1	MC	1	淺	1.1.1	指出温度計所使用的化學性質。	
-LQ1a	LQ	2	中	4.5.2	計算長直載流導線在距離其 6 cm 處所產生的磁場量值。	
-LQ1bi	LQ	2	中	4.5.2	解釋螺線管長度和匝數加倍對磁場的影響。	
+MC1	MC	1	淺	1.1.1	指出空氣中氧氣的檢驗方法。	A
+MC2	MC	1	中	4.1.1	判斷哪一種物質屬於強酸。	C
+LQ1a	LQ	2	中	7.1.1	根據半方程判斷氧化劑與還原劑。	
+LQ1bi	LQ	2	中	7.1.1	計算該氧化還原反應的電子轉移數。	
 
 【絕對禁止】
 - 不要輸出任何表格、標題、Markdown 語法或說明文字。
-- 只能輸出題目行，欄位數量固定為 7 個 Tab 分隔值（最後一個答案欄空白）。
-- topicDesc 必須是你自己歸納的 20-30 字描述，不可直接抄寫對照表中的長句。`;
+- 只能輸出題目行，欄位數量固定為 7 個 Tab 分隔值。
+- topicDesc 必須是你自己歸納的 20-30 字描述，不可直接抄寫對照表中的長句。
+- MC 題的正確答案欄必須填寫 A/B/C/D，不可留空；LQ 題的正確答案欄務必留空。`;
 
     const copyPromptToClipboard = () => {
         navigator.clipboard.writeText(buildQuickPromptText());
@@ -4738,7 +4743,10 @@ const HomeworkScoresInputView = ({ activeStudents, currentCohort, homeworkMaps, 
             liveMax += q.max;
             const val = currentEdit.scores[q.id];
             if (q.type === 'MC') {
-                if (val && q.ans && val.toString().toUpperCase() === q.ans.toUpperCase()) liveTotal += q.max;
+                if (val && q.ans) {
+                    const correctAnswers = q.ans.toString().split(',').map(a => a.trim().toUpperCase());
+                    if (correctAnswers.includes(val.toString().trim().toUpperCase())) liveTotal += q.max;
+                }
             } else { liveTotal += (val === '' || val === undefined ? 0 : parseFloat(val)); }
         });
     }
@@ -4838,7 +4846,9 @@ const HomeworkScoresInputView = ({ activeStudents, currentCohort, homeworkMaps, 
                                    
                                     {map.questions.map((q, idx) => {
                                         const val = currentEdit.scores[q.id];
-                                        const isCorrect = q.type === 'MC' ? (val && q.ans && val.toString().toUpperCase() === q.ans.toUpperCase()) : (val !== '' && parseFloat(val) === q.max);
+                                        const isCorrect = q.type === 'MC'
+                                            ? (val && q.ans && q.ans.toString().split(',').map(a => a.trim().toUpperCase()).includes(val.toString().trim().toUpperCase()))
+                                            : (val !== '' && parseFloat(val) === q.max);
                                         
                                         return (
                                             <div key={q.id} className="flex items-center gap-3 p-2 hover:bg-slate-50 border border-transparent hover:border-slate-100 rounded-lg group transition">
@@ -4955,7 +4965,11 @@ const HomeworkSummaryView = ({ activeStudents, currentCohort, homeworkMaps, home
                     homeworkMaps[hwId].questions.forEach(q => {
                         const val = scoresObj[q.id];
                         if (q.type === 'MC') {
-                            if (val && q.ans && val.toString().toUpperCase() === q.ans.toUpperCase()) sum += q.max;
+                            if (val && q.ans) {
+                                const correctAnswers = q.ans.toString().split(',').map(a => a.trim().toUpperCase());
+                                if (correctAnswers.includes(val.toString().trim().toUpperCase())) sum += q.max;
+                            }
+                            if (val !== undefined && val !== '') hasScore = true;
                         } else {
                             if (val !== undefined && val !== '') {
                                 sum += parseFloat(val);
@@ -8608,6 +8622,7 @@ const App = () => {
                     })
                     .catch(err => { 
                         console.error("讀取失敗:", err); 
+                        alert("無法連接到 Google Sheet！\n\n錯誤: " + (err.message || err) + "\n\n請檢查：\n1. API_URL 是否正確？\n2. Apps Script 是否已部署為「網頁應用程式」？\n3. 存取權限是否設為「任何人」？\n4. 工作表名稱是否為「DB」？");
                         setIsLoading(false); 
                     });
             }, []);
@@ -8652,7 +8667,7 @@ const App = () => {
                     })
                     .catch(err => {
                         console.error("存檔網路失敗:", err);
-                        alert("同步到雲端失敗！請檢查網路連線。");
+                        alert("同步到雲端失敗！\n\n錯誤詳情: " + (err.message || err) + "\n\n請檢查：\n1. Google Apps Script 是否已重新部署？\n2. 存取權限是否設為「任何人」？\n3. 工作表名稱是否為「DB」？\n4. 瀏覽器 Console (F12) 有沒有更多錯誤訊息？");
                         setIsSaving(false);
                     });
                 } catch (error) {
