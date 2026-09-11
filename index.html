@@ -5332,8 +5332,30 @@ const HomeworkScoresInputView = ({ activeStudents, currentCohort, homeworkMaps, 
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     {q.type === 'MC' ? (
-                                                        <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-lg border border-slate-200">
-                                                            {['A','B','C','D'].map(opt => <button key={opt} onClick={() => handleScoreChange(q.id, val === opt ? '' : opt, { forceAuto: idx === map.questions.length - 1 })} className={`w-7 h-7 rounded text-xs font-bold transition shadow-sm border ${val === opt ? 'bg-amber-500 text-white border-amber-600' : 'bg-white text-slate-600 hover:bg-slate-100 border-slate-200'}`}>{opt}</button>)}
+                                                        <div className="flex items-center gap-2">
+                                                            <input
+                                                                ref={el => inputRefs.current[q.id] = el}
+                                                                type="text"
+                                                                maxLength={1}
+                                                                className="w-10 h-8 text-center border border-slate-300 rounded font-bold font-mono text-sm bg-white focus:ring-2 focus:ring-amber-400 outline-none shadow-sm uppercase"
+                                                                value={val !== undefined && val !== null ? val : ''}
+                                                                onChange={(e) => {
+                                                                    let newVal = e.target.value.toUpperCase().replace(/[^A-D]/g, '');
+                                                                    if (newVal.length > 1) newVal = newVal.slice(-1);
+                                                                    handleScoreChange(q.id, newVal, { forceAuto: idx === map.questions.length - 1 && newVal !== '' });
+                                                                    if (newVal.length === 1 && map.questions[idx + 1]) {
+                                                                        const nextQ = map.questions[idx + 1];
+                                                                        setTimeout(() => {
+                                                                            if (inputRefs.current[nextQ.id]) {
+                                                                                inputRefs.current[nextQ.id].focus();
+                                                                                inputRefs.current[nextQ.id].select();
+                                                                            }
+                                                                        }, 0);
+                                                                    }
+                                                                }}
+                                                                onFocus={(e) => e.target.select()}
+                                                                placeholder="-"
+                                                            />
                                                         </div>
                                                     ) : (
                                                         <div className="flex items-center gap-2">
