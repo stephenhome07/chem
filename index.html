@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V1.09 Chemistry Quiz Analyzer</title>
+    <title>V1.10 Chemistry Quiz Analyzer</title>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -8814,9 +8814,20 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
     const radarInstance = React.useRef(null);
 
     // ---------------- 3. 核心學生資訊與同儕名單 ----------------
+    // ★ 同時支援 ?sid=S5A-3（班座 id）或 ?sid=s22070013（永久學號）
     const currentStudent = React.useMemo(() => {
-        return (students || []).find(s => s.id === studentId) || {};
+        const key = (studentId || '').toString().trim();
+        if (!key) return {};
+        return (students || []).find(s =>
+            s.id === key ||
+            s.sid === key ||
+            (s.sid && s.sid.toString().toLowerCase() === key.toLowerCase()) ||
+            (s.id && s.id.toString().toLowerCase() === key.toLowerCase())
+        ) || {};
     }, [students, studentId]);
+
+    // ★ 成績資料一律用系統內的 students[].id 做 key（與老師端寫入一致）
+    const resolvedStudentId = currentStudent.id || studentId;
 
     const studentCohort = currentStudent.cohort || '';
 
@@ -8856,8 +8867,8 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         const base = pastpaperScores || {};
         const finalUpdatedScores = {
             ...base,
-            [studentId]: {
-                ...(base[studentId] || {}),
+            [resolvedStudentId]: {
+                ...(base[resolvedStudentId] || {}),
                 [paperId]: newRecord
             }
         };
@@ -8876,7 +8887,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
             setTimeout(() => setPpSaveStatus(s => s === 'saved' ? 'idle' : s), 2500);
         }
         return true;
-    }, [studentId, pastpaperScores, setPastpaperScores, syncToCloud]);
+    }, [resolvedStudentId, pastpaperScores, setPastpaperScores, syncToCloud]);
 
     const schedulePpAutoSave = React.useCallback((nextValues) => {
         if (ppAutoSaveTimer.current) clearTimeout(ppAutoSaveTimer.current);
@@ -8929,7 +8940,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
     const ppStats = React.useMemo(() => {
         const safePPMaps = pastpaperMaps || (typeof window !== 'undefined' ? window.PASTPAPER_MAPS : null) || {};
         const safePPScores = pastpaperScores || (typeof window !== 'undefined' ? window.PASTPAPER_SCORES : null) || {};
-        const studentPastpaper = safePPScores?.[studentId] || {};
+        const studentPastpaper = safePPScores?.[resolvedStudentId] || {};
         const stats = {};
         let totalCompleted = 0;
         
@@ -8988,7 +8999,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         });
         
         return { byYear: stats, totalCompleted };
-    }, [studentId, pastpaperScores, pastpaperMaps]);
+    }, [resolvedStudentId, pastpaperScores, pastpaperMaps]);
 
     // ---------------- 5. ★ 功課狀態精細化計算 (包含 <= 50% 弱點追蹤) ----------------
     const hwStats = React.useMemo(() => {
@@ -9000,7 +9011,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         
         const details = availableHws.map(hwId => {
             const hwInfo = homeworkMaps[hwId];
-            const studentHw = homeworkScores?.[studentId]?.[hwId];
+            const studentHw = homeworkScores?.[resolvedStudentId]?.[hwId];
             
             if (!studentHw || !studentHw.scores || Object.keys(studentHw.scores).length === 0) {
                 missing++;
@@ -9038,7 +9049,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         });
 
         return { total: availableHws.length, completed, needsCorrection, missing, details };
-    }, [studentId, studentCohort, homeworkMaps, homeworkScores]);
+    }, [resolvedStudentId, studentCohort, homeworkMaps, homeworkScores]);
 
     // ---------------- 6. ★ 通用評估數據萃取函式 (小測與考試用) ----------------
     const getAssessmentData = (record, mapInfo) => {
@@ -9113,7 +9124,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
     // 1. 個人雷達圖數據 (基於 Pastpaper)
     const personalDomainStats = React.useMemo(() => {
         const ds = { '1': { name: '熱學', e: 0, m: 0 }, '2': { name: '力學', e: 0, m: 0 }, '3': { name: '波動', e: 0, m: 0 }, '4': { name: '電磁學', e: 0, m: 0 }, '5': { name: '放射學', e: 0, m: 0 }, 'E3': { name: '能量', e: 0, m: 0 }, 'E4': { name: '醫學', e: 0, m: 0 } };
-        const sScores = pastpaperScores[studentId] || {};
+        const sScores = pastpaperScores[resolvedStudentId] || {};
         Object.keys(sScores).forEach(paperId => {
             const map = window.PASTPAPER_MAPS ? window.PASTPAPER_MAPS[paperId] : pastpaperMaps[paperId];
             if (!map || !map.questions) return;
@@ -9123,13 +9134,13 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                     let dKey = q.topicId.startsWith('E3') ? 'E3' : q.topicId.startsWith('E4') ? 'E4' : q.topicId.charAt(0);
                     if (ds[dKey]) {
                         ds[dKey].m += q.max;
-                        ds[dKey].e += getPastpaperQScore(studentId, paperId, q);
+                        ds[dKey].e += getPastpaperQScore(resolvedStudentId, paperId, q);
                     }
                 }
             });
         });
         return ds;
-    }, [studentId, pastpaperScores, pastpaperMaps, getPastpaperQScore]);
+    }, [resolvedStudentId, pastpaperScores, pastpaperMaps, getPastpaperQScore]);
 
     // 繪製雷達圖
     React.useEffect(() => {
@@ -9175,7 +9186,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         const topicStats = {};
         
         // 掃描小測
-        const sQuiz = scores[studentId] || {};
+        const sQuiz = scores[resolvedStudentId] || {};
         Object.keys(sQuiz).forEach(quizId => {
             const map = window.QUIZ_MAPS ? window.QUIZ_MAPS[quizId] : null;
             if (!map) return;
@@ -9191,7 +9202,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         });
 
         // 掃描大考
-        const sExam = examScores[studentId] || {};
+        const sExam = examScores[resolvedStudentId] || {};
         Object.keys(sExam).forEach(examId => {
             const map = window.EXAM_MAPS ? window.EXAM_MAPS[examId] : null;
             if (!map) return;
@@ -9210,13 +9221,13 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
             .map(t => ({ ...t, pct: t.e / t.m, descList: Array.from(t.errorDesc) }))
             .filter(t => t.m >= 5 && t.pct <= 0.6)
             .sort((a, b) => a.pct - b.pct);
-    }, [scores, examScores, studentId]);
+    }, [scores, examScores, resolvedStudentId]);
 
     // B. 抓取 Pastpaper 弱點 (根據選定的年份/卷目)
     const ppWeaknesses = React.useMemo(() => {
         if (selectedPPPapers.length === 0) return [];
         const topicStats = {};
-        const sScores = pastpaperScores[studentId] || {};
+        const sScores = pastpaperScores[resolvedStudentId] || {};
 
         selectedPPPapers.forEach(paperId => {
             const record = sScores[paperId] || {};
@@ -9227,7 +9238,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                 if (val !== undefined && val !== '') {
                     if (!topicStats[q.topicId]) topicStats[q.topicId] = { id: q.topicId, name: q.topicDesc || '綜合', m: 0, e: 0, errorDesc: new Set() };
                     topicStats[q.topicId].m += q.max;
-                    const eScore = getPastpaperQScore(studentId, paperId, q);
+                    const eScore = getPastpaperQScore(resolvedStudentId, paperId, q);
                     topicStats[q.topicId].e += eScore;
                     if (eScore < q.max && q.topicDesc) topicStats[q.topicId].errorDesc.add(q.topicDesc);
                 }
@@ -9238,7 +9249,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
             .map(t => ({ ...t, pct: t.e / t.m, descList: Array.from(t.errorDesc) }))
             .filter(t => t.m > 0 && t.pct <= 0.6)
             .sort((a, b) => a.pct - b.pct);
-    }, [selectedPPPapers, pastpaperScores, studentId, pastpaperMaps, getPastpaperQScore]);
+    }, [selectedPPPapers, pastpaperScores, resolvedStudentId, pastpaperMaps, getPastpaperQScore]);
 
     // ================== 英雄榜運算區（多榜：功課 / 小測 / 統考 / 綜合 / Pastpaper） ==================
     const TITLE_POOL = { '1': ["元素獵人", "週期表達人"], '2': ["鍵結大師", "分子雕塑家"], '3': ["酸鹼勇者", "平衡守門員"], '4': ["氧化還原王", "電子傳輸者"], '5': ["有機合成師", "碳鏈行者"], 'E': ["化學之星", "實驗室之光"] };
@@ -9422,11 +9433,11 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         : rankBoardTab === 'exam' ? schoolRankings.exam
         : schoolRankings.composite;
 
-    const myComposite = schoolRankings.composite.find(d => d.student.id === studentId);
-    const myCompositeIndex = schoolRankings.composite.findIndex(d => d.student.id === studentId);
-    const myPp = pastpaperLeaderboard.find(d => d.student.id === studentId) || { totalQuestions: 0, title: '尚未起步', accuracy: 0 };
+    const myComposite = schoolRankings.composite.find(d => d.student.id === resolvedStudentId);
+    const myCompositeIndex = schoolRankings.composite.findIndex(d => d.student.id === resolvedStudentId);
+    const myPp = pastpaperLeaderboard.find(d => d.student.id === resolvedStudentId) || { totalQuestions: 0, title: '尚未起步', accuracy: 0 };
     const myRankData = myPp;
-    const myRankIndex = myCompositeIndex >= 0 ? myCompositeIndex : pastpaperLeaderboard.findIndex(d => d.student.id === studentId);
+    const myRankIndex = myCompositeIndex >= 0 ? myCompositeIndex : pastpaperLeaderboard.findIndex(d => d.student.id === resolvedStudentId);
 
     // ================== 生成 AI Prompt ==================
     const generatePrompt = () => {
@@ -9447,7 +9458,13 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
         window.open(platformUrl, '_blank');
     };
 
-    if (!currentStudent || !currentStudent.id) return <div className="p-10 text-center font-bold text-red-500">找不到學生資料！</div>;
+    if (!currentStudent || !currentStudent.id) return (
+        <div className="p-10 text-center">
+            <div className="text-xl font-bold text-red-500 mb-2">找不到學生資料！</div>
+            <div className="text-sm text-slate-500">連結參數 sid = <span className="font-mono font-bold">{studentId || '(空)'}</span></div>
+            <div className="text-xs text-slate-400 mt-2">請確認老師端學生名單已同步，並使用正確的班座編號（例如 S5A-3）或永久學號。</div>
+        </div>
+    );
 
     return (
         <div className="min-h-screen bg-slate-50 text-slate-800">
@@ -9706,7 +9723,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                                     <div className="p-10 text-center text-slate-400 text-base">此榜暫無成績資料，完成相關練習後就會出現排名！</div>
                                 ) : (
                                     activeLeaderboard.map((data, idx) => {
-                                        const isMe = data.student.id === studentId;
+                                        const isMe = data.student.id === resolvedStudentId;
                                         const isComposite = rankBoardTab === 'composite';
                                         const isPP = rankBoardTab === 'pastpaper';
                                         return (
@@ -9870,7 +9887,7 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                                             onChange={(e) => {
                                                 const paperId = e.target.value;
                                                 setPpSelectedPaper(paperId);
-                                                setPpInputValues(pastpaperScores?.[studentId]?.[paperId] || {});
+                                                setPpInputValues(pastpaperScores?.[resolvedStudentId]?.[paperId] || {});
                                             }}
                                         >
                                             <option value="">-- 請選擇卷目 --</option>
@@ -10135,12 +10152,12 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                                         <Icon name="CheckSquare" size={18} className="text-amber-500" /> 課堂小測
                                     </h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                        {(!scores || !scores[studentId] || Object.keys(scores[studentId]).length === 0) ? (
+                                        {(!scores || !scores[resolvedStudentId] || Object.keys(scores[resolvedStudentId]).length === 0) ? (
                                             <p className="text-sm text-slate-400">尚無小測紀錄</p>
                                         ) : (
-                                            Object.keys(scores[studentId]).map(quizId => {
+                                            Object.keys(scores[resolvedStudentId]).map(quizId => {
                                                 const quizMap = typeof QUIZ_MAPS !== 'undefined' ? QUIZ_MAPS[quizId] : {};
-                                                const quizRecord = scores[studentId][quizId];
+                                                const quizRecord = scores[resolvedStudentId][quizId];
                                                 
                                                 // ★ 使用新版函式，同時獲取分數與弱點數據
                                                 const quizData = getAssessmentData(quizRecord, quizMap);
@@ -10198,12 +10215,12 @@ const StudentPortalView = ({ studentId, students, scores, examScores, homeworkSc
                                         <Icon name="Award" size={18} className="text-purple-500" /> 校內考試
                                     </h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                        {(!examScores || !examScores[studentId] || Object.keys(examScores[studentId]).length === 0) ? (
+                                        {(!examScores || !examScores[resolvedStudentId] || Object.keys(examScores[resolvedStudentId]).length === 0) ? (
                                             <p className="text-sm text-slate-400">尚無考試紀錄</p>
                                         ) : (
-                                            Object.keys(examScores[studentId]).map(examId => {
+                                            Object.keys(examScores[resolvedStudentId]).map(examId => {
                                                 const examMap = typeof EXAM_MAPS !== 'undefined' ? EXAM_MAPS[examId] : {};
-                                                const examRecord = examScores[studentId][examId];
+                                                const examRecord = examScores[resolvedStudentId][examId];
                                                 
                                                 // ★ 使用新版函式，同時獲取分數與弱點數據
                                                 const examData = getAssessmentData(examRecord, examMap);
