@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V1.14 Chemistry Quiz Analyzer</title>
+    <title>V1.15 Chemistry Quiz Analyzer</title>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -2174,32 +2174,116 @@ const QuizSettingsView = ({ syncToCloud, students, currentCohort, scores, setSco
         alert(`✅ 已刪除小測「${id}」${totalCount ? `及 ${totalCount} 位學生的相關成績` : ''}。`);
     };
 
+    // 解析一行：支援 Tab、CSV 逗號、多空白
+    const parseQuizLine = (rawLine) => {
+        let line = (rawLine || '').trim();
+        if (!line) return null;
+        // 去掉可能的 BOM / 全形空白
+        line = line.replace(/^\uFEFF/, '').replace(/\u3000/g, ' ');
+
+        const splitCsv = (s) => {
+            const out = [];
+            let cur = '';
+            let inQ = false;
+            for (let i = 0; i < s.length; i++) {
+                const ch = s[i];
+                if (ch === '"') {
+                    if (inQ && s[i + 1] === '"') { cur += '"'; i++; }
+                    else inQ = !inQ;
+                } else if ((ch === ',' || ch === '，') && !inQ) {
+                    out.push(cur.trim());
+                    cur = '';
+                } else {
+                    cur += ch;
+                }
+            }
+            out.push(cur.trim());
+            return out;
+        };
+
+        let cols = line.split('\t').map(c => c.trim());
+        if (cols.length < 8) {
+            const csv = splitCsv(line);
+            if (csv.length >= 8) cols = csv;
+        }
+        if (cols.length < 8) {
+            const multi = line.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+            if (multi.length >= 8) cols = multi;
+        }
+        if (cols.length < 8) return null;
+
+        // 若第一欄是表頭則略過
+        const c0 = (cols[0] || '').toLowerCase();
+        if (c0.includes('小測編號') || c0 === 'quizid' || c0 === 'quiz_id') return null;
+
+        const quizId = cols[0] || '';
+        const title = cols[1] || '';
+        const qId = cols[2] || '';
+        const type = (cols[3] || 'LQ').toUpperCase();
+        const max = cols[4] || '1';
+        const level = cols[5] || '';
+        const topicId = cols[6] || '';
+        const desc = cols[7] || '';
+        const ans = (cols[8] || '').toString().trim().toUpperCase();
+        if (!quizId || !qId) return null;
+        let maxNum = parseFloat(max);
+        if (isNaN(maxNum) || maxNum <= 0) maxNum = 1;
+        return {
+            quizId: quizId.trim(),
+            title: title.trim(),
+            question: {
+                id: qId.trim(),
+                type: type === 'MC' ? 'MC' : 'LQ',
+                max: maxNum,
+                level: level.trim(),
+                topicId: topicId.trim(),
+                topicDesc: desc.trim(),
+                ans: ans
+            }
+        };
+    };
+
     const handleSave = () => {
         try {
             const newQuizMaps = {};
-            const qLines = quizText.trim().split('\n');
-            for (let i = 1; i < qLines.length; i++) {
-                if (!qLines[i].trim()) continue;
-                const cols = qLines[i].split('\t');
-                if (cols.length < 8) continue;
-                const [quizId, title, qId, type, max, level, topicId, desc, ans] = cols.map(c => c ? c.trim() : '');
-                if (!quizId || !qId) continue;
+            const qLines = quizText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n');
+            let parsedCount = 0;
+            let skipped = 0;
+            for (let i = 0; i < qLines.length; i++) {
+                const row = parseQuizLine(qLines[i]);
+                if (!row) {
+                    if (qLines[i].trim()) skipped++;
+                    continue;
+                }
+                const { quizId, title, question } = row;
                 if (!newQuizMaps[quizId]) {
                     newQuizMaps[quizId] = { title: title, questions: [] };
+                } else if (title && !newQuizMaps[quizId].title) {
+                    newQuizMaps[quizId].title = title;
                 }
-                newQuizMaps[quizId].questions.push({
-                    id: qId, type: type, max: Number(max), level: level, topicId: topicId, topicDesc: desc, ans: ans || ''
-                });
+                // 若同一題 id 重複，以後面為準
+                const qi = newQuizMaps[quizId].questions.findIndex(q => q.id === question.id);
+                if (qi >= 0) newQuizMaps[quizId].questions[qi] = question;
+                else newQuizMaps[quizId].questions.push(question);
+                parsedCount++;
             }
-            // 若文字框完全清空了某份已有成績的小測，提醒
+
+            if (parsedCount === 0) {
+                alert('❌ 未能解析到任何題目！\n\n請確認格式為 9 欄，可用：\n• Tab 分隔（建議）\n• CSV 逗號分隔\n\n欄位順序：\n小測編號 | 小測標題 | 題目ID | 題型 | 滿分 | 難度 | 課題編號 | 題目描述 | 正確答案\n\n（略過 ' + skipped + ' 行無法辨識的內容）');
+                return;
+            }
+
             const oldMaps = getQuizMaps();
             const removed = Object.keys(oldMaps).filter(id => !newQuizMaps[id]);
+            let nextScores = scores || {};
+            let removeIds = removed.slice();
+
             if (removed.length > 0) {
                 const withScores = removed.filter(id => countScoresForQuiz(id) > 0);
                 if (withScores.length > 0) {
                     const detail = withScores.map(id => `• ${id}（全庫 ${countScoresForQuiz(id)} 人已有成績）`).join('\n');
-                    if (!confirm(`以下小測將從藍圖中消失，且相關成績會一併清除：\n${detail}\n\n確定儲存？`)) return;
-                    const nextScores = { ...(scores || {}) };
+                    if (!confirm(`以下小測不在新資料中，將被刪除並清除相關成績：\n${detail}\n\n確定儲存？`)) return;
+                    nextScores = { ...(scores || {}) };
                     withScores.forEach(qid => {
                         Object.keys(nextScores).forEach(sid => {
                             if (nextScores[sid] && nextScores[sid][qid] !== undefined) {
@@ -2210,21 +2294,29 @@ const QuizSettingsView = ({ syncToCloud, students, currentCohort, scores, setSco
                         });
                     });
                     if (typeof setScores === 'function') setScores(nextScores);
-                    QUIZ_MAPS = newQuizMaps;
-                    if (typeof window !== 'undefined') window.QUIZ_MAPS = newQuizMaps;
-                    setQuizListVersion(v => v + 1);
-                    if (typeof syncToCloud === 'function') {
-                        syncToCloud({ quizMaps: newQuizMaps, scores: nextScores, removeQuizIds: withScores });
-                    }
-                    alert('✅ 小測內容已同步（含清除已刪除小測的成績）！');
-                    return;
+                } else if (removed.length > 0) {
+                    if (!confirm(`以下小測不在新資料中，將從藍圖刪除：\n${removed.map(id => '• ' + id).join('\n')}\n\n確定儲存？`)) return;
                 }
             }
+
             QUIZ_MAPS = newQuizMaps;
             if (typeof window !== 'undefined') window.QUIZ_MAPS = newQuizMaps;
+            rebuildTextFromMaps(newQuizMaps);
             setQuizListVersion(v => v + 1);
-            if (typeof syncToCloud === 'function') syncToCloud({ quizMaps: newQuizMaps });
-            alert('✅ 小測內容（含正確答案）已同步到 Google Sheet！');
+
+            if (typeof syncToCloud === 'function') {
+                // ★ 強制以文字框內容完整覆蓋 quizMaps（避免 merge 把舊編號留在雲端）
+                const payload = {
+                    quizMaps: newQuizMaps,
+                    replaceKeys: ['quizMaps']
+                };
+                if (removeIds.length > 0) payload.removeQuizIds = removeIds;
+                if (nextScores !== scores) payload.scores = nextScores;
+                syncToCloud(payload);
+            }
+
+            const quizN = Object.keys(newQuizMaps).length;
+            alert(`✅ 已解析 ${parsedCount} 題、${quizN} 份小測，並同步到雲端！` + (skipped ? `\n（略過 ${skipped} 行無法辨識）` : ''));
         } catch (err) { alert('❌ 儲存失敗！' + err); }
     };
 
