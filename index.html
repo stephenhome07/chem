@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>V1.15 Chemistry Quiz Analyzer</title>
+    <title>V1.16 Chemistry Quiz Analyzer</title>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -2758,19 +2758,12 @@ const ExamScoresInputView = ({ activeStudents, examScores, setExamScores, syncTo
             }
         });
 
-        // ★ 計算 DSE 加權總分 (滿分 100)
+        // 計算加權總分 (MC + LQ 作為滿分，換算為 100 分滿分)
+        const totalScore = mcScore + lqScore;
+        const totalMax = mcMax + lqMax;
         let weightedScore = 0;
-        if (mcMax > 0 && lqMax > 0) {
-            // 同時有 MC 和 LQ，套用 35% / 65% 規則
-            const mcPercentage = (mcScore / mcMax) * 35;
-            const lqPercentage = (lqScore / lqMax) * 65;
-            weightedScore = (mcPercentage + lqPercentage).toFixed(1);
-        } else if (mcMax > 0) {
-            // 只有 MC (例如 Paper 1A)
-            weightedScore = ((mcScore / mcMax) * 100).toFixed(1);
-        } else if (lqMax > 0) {
-            // 只有 LQ (例如 Paper 1B)
-            weightedScore = ((lqScore / lqMax) * 100).toFixed(1);
+        if (totalMax > 0) {
+            weightedScore = ((totalScore / totalMax) * 100).toFixed(1);
         }
 
         return {
@@ -2960,7 +2953,7 @@ const ExamScoresInputView = ({ activeStudents, examScores, setExamScores, syncTo
                         <div className="text-2xl font-bold text-amber-700">
                             {currentStudentStats.weightedScore} <span className="text-sm font-normal text-amber-600">分</span>
                         </div>
-                        <div className="text-[10px] text-amber-500 mt-1">MC 35% + LQ 65%</div>
+                        <div className="text-[10px] text-amber-500 mt-1">(MC + LQ) / 總滿分 × 100%</div>
                     </div>
                 </div>
             )}
@@ -3908,13 +3901,19 @@ const RemedialPracticeView = ({ currentCohort, activeStudents, examScores, remed
         return val === '' || val === undefined ? 0 : parseFloat(val);
     }, [examScores, selectedExam]);
 
-    // 取得該生總分
+    
+// 取得該生加權總分 (MC + LQ 作為滿分，換算為 100 分滿分)
     const getStudentTotalScore = React.useCallback((studentId) => {
-        if (!map) return 0;
+        if (!map || !map.questions) return 0;
         let total = 0;
-        map.questions.forEach(q => total += getStudentQScore(studentId, q));
-        return total;
+        let max = 0;
+        map.questions.forEach(q => {
+            total += getStudentQScore(studentId, q);
+            max += (q.max || 1);
+        });
+        return max > 0 ? parseFloat(((total / max) * 100).toFixed(1)) : 0;
     }, [map, getStudentQScore]);
+
 
     // ★ 排序全體學生 (用於選擇器)
     const sortedActiveStudents = React.useMemo(() => {
@@ -4025,7 +4024,7 @@ const RemedialPracticeView = ({ currentCohort, activeStudents, examScores, remed
             return {
                 ...student,
                 examScore: getStudentTotalScore(student.id),
-                examMax: totalMax,
+                examMax: 100,
                 weakTopics,
                 completedCount,
                 totalWeakCount,
@@ -4360,19 +4359,9 @@ const ExamExportView = ({ currentCohort, activeStudents, examScores }) => {
         const titleStr = (examId + ' ' + map.title).toUpperCase();
         const isSenior = titleStr.includes('S4') || titleStr.includes('S5') || titleStr.includes('S6');
         
-        let totalScore = 0;
-        let totalMax = 100;
-        if (isSenior) {
-            // 高中卷：MC 佔 35%, LQ 佔 65%
-            const mcPart = mcMax > 0 ? (mcScore / mcMax) * 35 : 0;
-            const lqPart = lqMax > 0 ? (lqScore / lqMax) * 65 : 0;
-            totalScore = parseFloat((mcPart + lqPart).toFixed(1));
-            totalMax = 100;
-        } else {
-            // 初中卷 (S3)：直接加總
-            totalScore = mcScore + lqScore;
-            totalMax = mcMax + lqMax;
-        }
+        const rawTotalMax = mcMax + lqMax;
+        const totalScore = rawTotalMax > 0 ? parseFloat((((mcScore + lqScore) / rawTotalMax) * 100).toFixed(1)) : 0;
+        const totalMax = 100;
 
         return { mc: mcScore, lq: lqScore, total: totalScore, mcMax, lqMax, totalMax, isSenior };
     };
