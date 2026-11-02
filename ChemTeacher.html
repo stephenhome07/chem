@@ -980,14 +980,14 @@ function Sidebar({ view, setView, cohort, setCohort, cohorts, reload, loading })
           onChange={e => {
             const v = e.target.value;
             setCohort(v);
-            try { localStorage.setItem("phy_teacher_cohort", v); } catch (err) {}
+            try { localStorage.setItem("chem_teacher_cohort", v); } catch (err) {}
           }}>
           {(cohorts || []).map(c => <option key={c} value={c}>{c}</option>)}
         </select>
         <button className="text-xs text-indigo-600 font-bold" onClick={reload} disabled={loading}>
           {loading ? "載入中…" : "重新載入雲端"}
         </button>
-        <p className="text-[10px] text-slate-500 leading-snug">會記住上次群組，避免預設「所有學生」一次讀太多成績。</p>
+        <p className="text-[10px] text-slate-500 leading-snug">預設第一個真實群組；會記住你的選擇。極少才用「所有學生」。</p>
       </div>
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">排行</div>
@@ -8180,7 +8180,7 @@ function App() {
   const [pastpaperScores, setPastpaperScores] = useState({});
   const [loading, setLoading] = useState(true);
   const [cohort, setCohort] = useState(() => {
-    try { return localStorage.getItem("phy_teacher_cohort") || ""; } catch (e) { return ""; }
+    try { return localStorage.getItem("chem_teacher_cohort") || ""; } catch (e) { return ""; }
   });
   const [cohortReady, setCohortReady] = useState(false);
 
@@ -8199,16 +8199,20 @@ function App() {
       setMapsBundle({ homework: maps, quiz: qmaps, exam: emaps, pastpaper: pmaps });
       setPastpaperMaps(pmaps);
 
-      // 決定群組：記住的 > 第一個真實群組 > 所有學生
+      // 決定群組：記住的有效群組 > 第一個真實群組（預設不用「所有學生」）
       const realCohorts = Array.from(new Set(stu.map(s => s.cohort).filter(Boolean))).sort();
       let saved = "";
-      try { saved = localStorage.getItem("phy_teacher_cohort") || ""; } catch (e) {}
+      try { saved = localStorage.getItem("chem_teacher_cohort") || ""; } catch (e) {}
       let nextCohort = saved;
-      if (!nextCohort || (nextCohort !== "所有學生" && !realCohorts.includes(nextCohort))) {
+      // 已記住且仍存在 → 沿用；若記的是「所有學生」也尊重手動選擇
+      if (nextCohort && nextCohort !== "所有學生" && !realCohorts.includes(nextCohort)) {
+        nextCohort = "";
+      }
+      if (!nextCohort) {
         nextCohort = realCohorts[0] || "所有學生";
       }
       setCohort(nextCohort);
-      try { localStorage.setItem("phy_teacher_cohort", nextCohort); } catch (e) {}
+      try { localStorage.setItem("chem_teacher_cohort", nextCohort); } catch (e) {}
       setCohortReady(true);
 
       const sylId = await resolveSyllabusIdForCohort(nextCohort === "所有學生" ? "" : nextCohort);
@@ -8235,14 +8239,47 @@ function App() {
     })();
   }, [cohort, cohortReady]);
 
-  const cohorts = useMemo(() => ["所有學生", ...Array.from(new Set(students.map(s=>s.cohort).filter(Boolean))).sort()], [students]);
+  const cohorts = useMemo(() => [...Array.from(new Set(students.map(s=>s.cohort).filter(Boolean))).sort(), "所有學生"], [students]);
   const activeStudents = useMemo(() => {
     const base = cohort==="所有學生" ? students : students.filter(s=>s.cohort===cohort);
     return base.filter(s => s.active !== false);
   }, [students, cohort]);
 
   return (
-    <div className="flex min-h-screen">
+    <div className="min-h-screen flex flex-col">
+      {/* ★ 固定頂欄：群組永遠可見 */}
+      <div className="sticky top-0 z-50 bg-indigo-700 text-white shadow-md">
+        <div className="flex flex-wrap items-center gap-3 px-4 py-2.5">
+          <div className="font-black text-sm tracking-wide shrink-0">Chemistry Teacher</div>
+          <div className="h-5 w-px bg-white/30 hidden sm:block" />
+          <label className="flex items-center gap-2 text-xs font-bold shrink-0">
+            <span className="opacity-90">目前群組</span>
+            <select
+              className="border-0 rounded-lg px-2.5 py-1.5 text-sm font-black text-indigo-900 bg-white shadow focus:ring-2 focus:ring-amber-300 min-w-[9rem]"
+              value={cohort}
+              onChange={e => {
+                const v = e.target.value;
+                setCohort(v);
+                try { localStorage.setItem("chem_teacher_cohort", v); } catch (err) {}
+              }}
+            >
+              {(cohorts || []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <span className="text-[11px] text-indigo-100 hidden md:inline">
+            {cohort === "所有學生" ? "（全校）" : ""} · {activeStudents.length} 人
+          </span>
+          <button
+            type="button"
+            className="ml-auto text-xs font-bold bg-white/15 hover:bg-white/25 px-3 py-1.5 rounded-lg transition"
+            onClick={reload}
+            disabled={loading}
+          >
+            {loading ? "載入中…" : "重新載入"}
+          </button>
+        </div>
+      </div>
+      <div className="flex flex-1 min-h-0">
       <Sidebar view={view} setView={setView} cohort={cohort} setCohort={setCohort} cohorts={cohorts} reload={reload} loading={loading} />
       <main className="flex-1 p-6 overflow-auto">
         {loading && <div className="text-xs text-slate-400 mb-2">載入中…</div>}
@@ -8271,6 +8308,7 @@ function App() {
         {view==="ppPersonal" && <PastpaperPersonalAnalysisView activeStudents={activeStudents} pastpaperMaps={pastpaperMaps} />}
         {view==="ppSettings" && <PastpaperSettingsView pastpaperMaps={pastpaperMaps} setPastpaperMaps={setPastpaperMaps} />}
       </main>
+      </div>
     </div>
   );
 }
