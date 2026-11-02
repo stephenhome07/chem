@@ -1,0 +1,2358 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Chemistry Student · Firebase</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.9/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  body{font-family:"Segoe UI","PingFang TC","Noto Sans TC",sans-serif}
+  .mono{font-family:ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body class="bg-[#f1f5f9] text-slate-800">
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+/** @jsxRuntime classic */
+/** @jsx React.createElement */
+/** @jsxFrag React.Fragment */
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+// ★ Chemistry Firebase 專案：hoyuchem-77e92
+const firebaseConfig = {
+  apiKey: "AIzaSyCQChzPcPbcOm6X0n29zkja8jH1llsRerc",
+  authDomain: "hoyuchem-77e92.firebaseapp.com",
+  projectId: "hoyuchem-77e92",
+  storageBucket: "hoyuchem-77e92.firebasestorage.app",
+  messagingSenderId: "999538168119",
+  appId: "1:999538168119:web:948effcf72792406ce0ab2"
+};
+if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+const SS_SID = "chem_student_id";
+const LS_LAST_SID = "chem_student_last_sid";
+const SS_ADMIN = "chem_student_admin";
+
+// ---------- helpers ----------
+function hasPin(stu) {
+  return stu && stu.pin != null && String(stu.pin).trim() !== "";
+}
+function labelStudent(s) {
+  return `${s.class || ""}-${s.num != null ? s.num : ""} ${s.name || ""}`;
+}
+function isJuniorClass(stu) {
+  const c = String(stu?.class || "").toUpperCase();
+  return /^S[345]/.test(c) || c.startsWith("3") || c.startsWith("4") || c.startsWith("5");
+}
+function quizQuestionScore(q, raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  if (q.type === "MC") {
+    if (!q.ans) return 0;
+    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
+    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+  }
+  const n = parseFloat(raw);
+  return isNaN(n) ? 0 : n;
+}
+function domainFromTopicId(tid) {
+  if (!tid) return null;
+  const s = String(tid);
+  if (s.startsWith("13") || s.startsWith("E1")) return "13";
+  if (s.startsWith("14") || s.startsWith("E2")) return "14";
+  if (s.startsWith("15") || s.startsWith("E3")) return "15";
+  const head = (s.split(".")[0] || s.charAt(0));
+  if (["1","2","3","4","5","6","7","8","9","10","11","12"].includes(head)) return head;
+  return null;
+}
+const DOMAIN_LABELS = {
+  "1": "地球", "2": "微觀I", "3": "金屬", "4": "酸鹼", "5": "碳化",
+  "6": "微觀II", "7": "氧化還原", "8": "能量", "9": "速率", "10": "平衡",
+  "11": "有機", "12": "規律", "13": "工業", "14": "材料", "15": "分析"
+};
+let SYLLABUS_TOPICS = {};
+async function loadSyllabusTopics() {
+  try {
+    const snap = await db.collection("syllabus").get();
+    snap.forEach(d => {
+      const data = d.data() || {};
+      const topics = data.data || data.topics || data;
+      if (topics && typeof topics === "object") {
+        Object.assign(SYLLABUS_TOPICS, topics.data && typeof topics.data === "object" ? topics.data : topics);
+      }
+    });
+  } catch (e) { console.warn(e); }
+  return SYLLABUS_TOPICS;
+}
+function getSyllabusTableText(topicIds) {
+  const topics = SYLLABUS_TOPICS || {};
+  const lines = ["課題編號\t範疇\t課題名稱\t學習要求"];
+  const idList = topicIds && topicIds.length ? [...new Set(topicIds.filter(Boolean))] : Object.keys(topics);
+  idList.forEach(id => {
+    const val = topics[id];
+    if (typeof val === "object" && val !== null) {
+      lines.push(`${id}\t${val.section || ""}\t${val.topic || val.name || ""}\t${val.desc || ""}`);
+    } else if (val != null) {
+      lines.push(`${id}\t\t${val}\t`);
+    } else {
+      lines.push(`${id}\t\t\t`);
+    }
+  });
+  return lines.length <= 1 ? "（課程大綱參考：請按 topicId 對照 DSE 化學課程）" : lines.join("\n");
+}
+
+function estimateDseLevel(pct01) {
+  const p = (pct01 == null || isNaN(pct01)) ? null : (pct01 > 1 ? pct01 / 100 : pct01);
+  if (p == null) return { level: "—", color: "bg-slate-100 text-slate-500 border-slate-200" };
+  const pct = p * 100;
+  if (pct >= 85) return { level: "5**", color: "bg-purple-100 text-purple-800 border-purple-300" };
+  if (pct >= 78) return { level: "5*", color: "bg-indigo-100 text-indigo-800 border-indigo-300" };
+  if (pct >= 67) return { level: "5", color: "bg-blue-100 text-blue-800 border-blue-300" };
+  if (pct >= 55) return { level: "4", color: "bg-sky-100 text-sky-800 border-sky-300" };
+  if (pct >= 40) return { level: "3", color: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+  if (pct >= 30) return { level: "2", color: "bg-amber-100 text-amber-900 border-amber-300" };
+  if (pct >= 20) return { level: "1", color: "bg-orange-100 text-orange-800 border-orange-300" };
+  return { level: "U", color: "bg-rose-100 text-rose-800 border-rose-300" };
+}
+
+async function loadAllStudents() {
+  const snap = await db.collection("students").get();
+  const list = [];
+  snap.forEach(d => {
+    const data = d.data() || {};
+    if (data.active === false) return;
+    list.push({ ...data, id: d.id });
+  });
+  list.sort((a, b) => String(a.class || "").localeCompare(String(b.class || "")) || (Number(a.num) || 0) - (Number(b.num) || 0));
+  return list;
+}
+async function loadStudent(id) {
+  const snap = await db.collection("students").doc(id).get();
+  return snap.exists ? { ...snap.data(), id: snap.id } : null;
+}
+async function loadCollectionMaps(col) {
+  const snap = await db.collection(col).get();
+  const out = {};
+  snap.forEach(d => { out[d.id] = { ...d.data(), _id: d.id }; });
+  return out;
+}
+async function savePastpaperScore(studentId, paperId, record) {
+  await db.collection("scores").doc(studentId).collection("pastpapers").doc(String(paperId)).set({
+    ...record,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+async function loadMakeupCollection(col) {
+  const out = {};
+  try {
+    const snap = await db.collection(col).get();
+    snap.forEach(d => {
+      out[d.id] = (d.data() || {}).students || {};
+    });
+  } catch (e) { console.warn(e); }
+  return out;
+}
+const __summaryCache = new Map();
+function quizRecHasAnyScore(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  return Object.keys(rec).some(k => !["updatedAt", "_id", "value"].includes(k) && rec[k] !== "" && rec[k] != null);
+}
+
+/** 群組內至少一人有分的小測 ID（未教的不顯示；自己缺席仍顯示未測） */
+async function loadTaughtQuizIds(studentIds, quizIds) {
+  const taught = new Set();
+  if (!studentIds?.length || !quizIds?.length) return taught;
+  for (const qid of quizIds) {
+    for (const sid of studentIds) {
+      try {
+        const snap = await db.collection("scores").doc(sid).collection("quizzes").doc(String(qid)).get();
+        if (snap.exists && quizRecHasAnyScore(snap.data())) {
+          taught.add(String(qid));
+          break;
+        }
+      } catch (e) {}
+    }
+  }
+  return taught;
+}
+
+async function loadScoreSummaries(studentIds) {
+
+  const out = {};
+  const need = [];
+  studentIds.forEach(sid => {
+    if (__summaryCache.has(sid)) out[sid] = __summaryCache.get(sid);
+    else need.push(sid);
+  });
+  for (let i = 0; i < need.length; i += 20) {
+    const slice = need.slice(i, i + 20);
+    await Promise.all(slice.map(async sid => {
+      try {
+        const snap = await db.collection("scoreSummary").doc(sid).get();
+        if (snap.exists) {
+          out[sid] = snap.data();
+          __summaryCache.set(sid, out[sid]);
+        } else out[sid] = null;
+      } catch (e) { out[sid] = null; }
+    }));
+  }
+  return out;
+}
+
+async function loadSubScores(sid, sub) {
+  const out = {};
+  try {
+    const snap = await db.collection("scores").doc(sid).collection(sub).get();
+    snap.forEach(d => {
+      let data = d.data() || {};
+      if (data.value && typeof data.value === "object" && !Array.isArray(data.value)) {
+        data = { ...data.value, updatedAt: data.updatedAt };
+      }
+      out[d.id] = data;
+    });
+  } catch (e) { console.warn(e); }
+  return out;
+}
+function mapVisible(map, cohort) {
+  if (!map) return false;
+  if (!map.cohort || map.cohort === "" || map.cohort === "所有學生") return true;
+  if (!cohort) return true;
+  return map.cohort === cohort;
+}
+/** 學生端功課：只顯示「本群組」或「該生已有成績紀錄」的功課，避免其他年份洗版 */
+function homeworkVisibleForStudent(map, hid, cohort, hwScores) {
+  if (!map) return false;
+  const hasScore = !!(hwScores && hwScores[hid] && (
+    (hwScores[hid].scores && Object.keys(hwScores[hid].scores).length) ||
+    hwScores[hid].remakeStatus
+  ));
+  if (map.cohort && map.cohort !== "" && map.cohort !== "所有學生") {
+    return map.cohort === cohort;
+  }
+  // 無指定群組：學生端預設不顯示，除非本人已有此份紀錄
+  return hasScore;
+}
+function scoreOfRec(map, rec) {
+  if (!map?.questions?.length || !rec) return null;
+  let earned = 0, max = 0, any = false;
+  map.questions.forEach(q => {
+    max += q.max || 0;
+    const raw = rec.scores ? rec.scores[q.id] : rec[q.id];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return;
+    any = true;
+    const sc = quizQuestionScore(q, raw);
+    earned += sc == null ? 0 : sc;
+  });
+  if (!any || max <= 0) return null;
+  return { earned, max, pct: earned / max };
+}
+function isSeniorExamMap(map, examId) {
+  const titleStr = String((examId || "") + " " + (map && map.title || "")).toUpperCase();
+  if (titleStr.includes("S3") || titleStr.includes("中三") || titleStr.includes("初中")) return false;
+  if (titleStr.includes("S4") || titleStr.includes("S5") || titleStr.includes("S6") || titleStr.includes("高中") || titleStr.includes("DSE")) return true;
+  return true;
+}
+function examWeighted(map, rec, examId) {
+  if (!map?.questions?.length || !rec) return null;
+  let mcS = 0, mcM = 0, lqS = 0, lqM = 0, any = false;
+  map.questions.forEach(q => {
+    const max = q.max || 1;
+    if (q.type === "MC") mcM += max; else lqM += max;
+    const raw = rec[q.id];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return;
+    any = true;
+    const sc = quizQuestionScore(q, raw);
+    if (sc == null) return;
+    if (q.type === "MC") mcS += sc; else lqS += sc;
+  });
+  if (!any) return null;
+  const total = mcS + lqS, totalMax = mcM + lqM;
+  const senior = isSeniorExamMap(map, examId);
+  let w = totalMax > 0 ? (total / totalMax) * 100 : 0;
+  if (senior && mcM > 0 && lqM > 0) w = ((mcS / mcM) * 0.35 + (lqS / lqM) * 0.65) * 100;
+  return { weighted: w, total, max: totalMax, pct: totalMax > 0 ? total / totalMax : 0, isSenior: senior };
+}
+function accumulateDomains(maps, scoresTree, domainAcc) {
+  Object.keys(scoresTree || {}).forEach(pid => {
+    const map = maps[pid];
+    if (!map?.questions) return;
+    const rec = scoresTree[pid] || {};
+    const body = rec.scores && typeof rec.scores === "object" ? { ...rec, ...rec.scores } : rec;
+    map.questions.forEach(q => {
+      const tid = q.topicId;
+      const dk = domainFromTopicId(tid);
+      if (!dk || !domainAcc[dk]) return;
+      const raw = body[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      domainAcc[dk].max += q.max || 1;
+      domainAcc[dk].earned += sc;
+    });
+  });
+}
+
+/** ~100 稱號：由總體 + 最強領域 + 勤奮度組合 */
+function buildTitlePool() {
+  const domains = ["地球", "微觀", "金屬", "酸鹼", "有機", "全能", "勤學", "補底", "實驗", "概念", "小測", "考試", "功課", "堂課", "筆記"];
+  const ranks = ["見習生", "學徒", "修行者", "能手", "達人", "高手", "專家", "宗師", "傳奇", "神話"];
+  const pool = [];
+  domains.forEach(d => ranks.forEach(r => pool.push(d + r)));
+  const extras = [
+    "午夜刷題人", "錯題回收專家", "公式獵人", "單位殺手", "圖像解讀王",
+    "長題馬拉松者", "MC 神射手", "LQ 拆解師", "實驗報告達人", "概念澄清者",
+    "持恆進步獎", "翻盤候選人", "穩健中游", "尖子候補", "化學詩人",
+    "分子建築師", "酸鹼法師", "金屬煉金師", "氧化還原守護者", "有機合成員",
+    // 校內向（無 Pastpaper 也常用）
+    "準時交功課之星", "改正小能手", "零欠交勇士", "堂堂有交", "補交終結者",
+    "小測穩陣黨", "小測翻盤王", "及格守門員", "高分獵人", "全對狂想曲",
+    "考試沉著臉", "時間管理師", "卷末衝刺者", "計分細心人", "讀題偵探",
+    "筆記整理狂", "錯題本達人", "溫習行程表", "Focus 模式", "番茄鐘戰士",
+    "問問題勇士", "同儕教練", "一教就明", "公式默寫王", "單位換算師",
+    "受力圖專家", "電路分析師", "波圖解讀者", "熱力流程通", "實驗設計者",
+    "誤差分析手", "圖表翻譯官", "文字題破解", "選擇題剋星", "長題分段王",
+    "起步加速中", "穩步上揚", "突破平台期", "今日比昨日好", "連續進步中",
+    "化學好奇寶寶", "為什麼追問者", "生活化學眼", "科幻連結者", "實驗室常客",
+    "黑板抄寫手", "重點螢光筆", "錯一次記一次", "考前總複習", "考後即反思",
+    "S4 化學新星", "S5 進階者", "S6 衝刺組", "DSE 候補", "5** 練習生",
+    "安靜專注型", "積極舉手型", "合作學習者", "獨立解難者", "壓力轉動力"
+  ];
+  extras.forEach(e => pool.push(e));
+  ["破浪", "夜讀", "精準", "穩陣", "火花", "冷靜", "韌性", "星火", "無雙", "晨光"].forEach(f => {
+    pool.push("金屬宗師·" + f, "酸鹼宗師·" + f, "勤學達人·" + f, "小測高手·" + f);
+  });
+  return Array.from(new Set(pool));
+}
+const TITLE_POOL = buildTitlePool();
+
+function pickTitle({ overallPct, domainPcts, hwDoneRate, ppCount, quizPct, examPct, missingHw, pendingHw }) {
+  const entries = Object.entries(domainPcts || {}).filter(([, v]) => v != null);
+  entries.sort((a, b) => b[1] - a[1]);
+  const topDom = entries[0] ? DOMAIN_LABELS[entries[0][0]] || "全能" : "勤學";
+  const pct = overallPct != null ? overallPct * 100 : (quizPct != null ? quizPct * 100 : (examPct != null ? examPct * 100 : 45));
+  const ranks = ["見習生", "學徒", "修行者", "能手", "達人", "高手", "專家", "宗師", "傳奇", "神話"];
+  let rankIdx = 0;
+  if (pct >= 90) rankIdx = 9;
+  else if (pct >= 85) rankIdx = 8;
+  else if (pct >= 78) rankIdx = 7;
+  else if (pct >= 70) rankIdx = 6;
+  else if (pct >= 62) rankIdx = 5;
+  else if (pct >= 55) rankIdx = 4;
+  else if (pct >= 48) rankIdx = 3;
+  else if (pct >= 40) rankIdx = 2;
+  else if (pct >= 30) rankIdx = 1;
+  let title = `${topDom}${ranks[rankIdx]}`;
+
+  // 校內行為向稱號（無 PP 也豐富）
+  if (missingHw === 0 && pendingHw === 0 && hwDoneRate != null && hwDoneRate >= 0.9) title = "零欠交勇士";
+  else if (missingHw === 0 && hwDoneRate != null && hwDoneRate >= 0.8) title = "準時交功課之星";
+  else if (pendingHw > 0 && missingHw === 0) title = "改正小能手";
+  else if (hwDoneRate != null && hwDoneRate >= 0.95) title = "勤學修行者";
+
+  if (quizPct != null) {
+    const qp = quizPct * 100;
+    if (qp >= 85) title = "小測穩陣黨";
+    else if (qp >= 70) title = "小測高手";
+    else if (qp < 45 && rankIdx <= 2) title = "小測翻盤王";
+  }
+  if (examPct != null && examPct * 100 >= 75) title = "考試沉著臉";
+
+  if (ppCount >= 300) title = "歷屆試題收藏家";
+  else if (ppCount >= 150 && pct >= 70) title = `${topDom}宗師·破浪`;
+  else if (ppCount >= 50) title = "Pastpaper 練習生";
+
+  if (pct >= 85 && entries[0] && entries[0][1] >= 0.9) title = `${topDom}神話`;
+
+  // 若構造稱號不在池中，用確定性索引從池抽取（保證多樣性）
+  if (!TITLE_POOL.includes(title)) {
+    const seed = [title, Math.round(pct), topDom, ppCount || 0, missingHw || 0].join("|");
+    const idx = Math.abs(seed.split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % TITLE_POOL.length;
+    title = TITLE_POOL[idx];
+  }
+  return title;
+}
+
+// ---------- Login ----------
+function LoginView({ onLogin }) {
+  const [students, setStudents] = useState([]);
+  const [sid, setSid] = useState("");
+  const [pin, setPin] = useState("");
+  const [pin2, setPin2] = useState("");
+  const [mode, setMode] = useState("enter"); // enter | setup
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await loadAllStudents();
+        setStudents(list);
+        let saved = "";
+        try { saved = localStorage.getItem(LS_LAST_SID) || ""; } catch (e) {}
+        if (!saved) saved = sessionStorage.getItem(SS_SID) || "";
+        if (saved && list.some(s => s.id === saved)) setSid(saved);
+      } catch (e) { setErr(e.message); }
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!sid) return;
+    const s = students.find(x => x.id === sid);
+    setMode(s && hasPin(s) ? "enter" : "setup");
+    setPin(""); setPin2(""); setErr("");
+  }, [sid, students]);
+
+  const submit = async () => {
+    setErr("");
+    if (!sid) return setErr("請選擇學生");
+    const stu = students.find(s => s.id === sid) || await loadStudent(sid);
+    if (!stu) return setErr("找不到學生");
+    if (mode === "setup") {
+      if (!/^\d{4}$/.test(pin)) return setErr("PIN 須為 4 位數字");
+      if (pin !== pin2) return setErr("兩次 PIN 不一致");
+      await db.collection("students").doc(sid).set({ pin, updatedAt: new Date().toISOString() }, { merge: true });
+      sessionStorage.setItem(SS_SID, sid);
+      try { localStorage.setItem(LS_LAST_SID, sid); } catch (e) {}
+      onLogin({ ...stu, pin });
+      return;
+    }
+    if (!hasPin(stu)) {
+      setMode("setup");
+      return;
+    }
+    if (String(pin) !== String(stu.pin)) return setErr("PIN 錯誤");
+    sessionStorage.setItem(SS_SID, sid);
+    try { localStorage.setItem(LS_LAST_SID, sid); } catch (e) {}
+    onLogin(stu);
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-400">載入中…</div>;
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-indigo-50 via-white to-sky-50">
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border p-8 space-y-4">
+        <div className="text-center">
+          <div className="text-2xl font-black text-indigo-700">Chemistry 學生</div>
+          <p className="text-sm text-slate-500 mt-1">選擇自己 → {mode === "setup" ? "首次設定 PIN" : "輸入 PIN"}</p>
+        </div>
+        <label className="block text-xs font-bold text-slate-500">學生
+          <select className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-sm font-semibold" value={sid} onChange={e => setSid(e.target.value)}>
+            <option value="">— 請選擇 —</option>
+            {students.map(s => <option key={s.id} value={s.id}>{labelStudent(s)}</option>)}
+          </select>
+        </label>
+        <label className="block text-xs font-bold text-slate-500">PIN（4 位數字）
+          <input type="password" inputMode="numeric" maxLength={4}
+            className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-lg tracking-widest text-center font-bold"
+            value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+        </label>
+        {mode === "setup" && (
+          <label className="block text-xs font-bold text-slate-500">確認 PIN
+            <input type="password" inputMode="numeric" maxLength={4}
+              className="mt-1 w-full border-2 rounded-xl px-3 py-2.5 text-lg tracking-widest text-center font-bold"
+              value={pin2} onChange={e => setPin2(e.target.value.replace(/\D/g, "").slice(0, 4))} />
+          </label>
+        )}
+        {err && <div className="text-sm text-rose-600 font-bold">{err}</div>}
+        <button className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-3 rounded-xl" onClick={submit}>
+          {mode === "setup" ? "設定並進入" : "進入"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Home Dashboard ----------
+function HomeDashboard({ student, maps, scores, makeup, taughtQuizzes, cohortPeers, peerScores }) {
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
+
+  const cohort = student.cohort || "";
+  const hwMaps = useMemo(() => {
+    const out = {};
+    Object.entries(maps.homework || {}).forEach(([id, m]) => {
+      if (homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) out[id] = m;
+    });
+    return out;
+  }, [maps.homework, cohort, scores.homeworks]);
+
+  // Homework status
+  const hwStatus = useMemo(() => {
+    const items = [];
+    Object.keys(hwMaps).forEach(hid => {
+      const map = hwMaps[hid];
+      const rec = scores.homeworks?.[hid];
+      const status = rec?.remakeStatus || (!rec || !rec.scores || !Object.keys(rec.scores || {}).length ? "MISSING" : "PENDING");
+      const sc = scoreOfRec(map, rec || {});
+      items.push({
+        id: hid,
+        title: map.title || hid,
+        status,
+        scoreText: sc ? `${Math.round(sc.earned)}/${Math.round(sc.max)}` : null,
+        topics: (map.questions || []).slice(0, 4).map(q => q.topicDesc || q.topicId || q.id).filter(Boolean)
+      });
+    });
+    const missing = items.filter(x => x.status === "MISSING" || x.status === "ABSENT");
+    const pending = items.filter(x => x.status === "PENDING");
+    const done = items.filter(x => x.status === "DONE" || x.status === "PERFECT");
+    const perfect = items.filter(x => x.status === "PERFECT");
+    return { items, missing, pending, done, perfect, total: items.length };
+  }, [hwMaps, scores.homeworks]);
+
+  // PP stats
+  const ppStats = useMemo(() => {
+    let qCount = 0, hit = 0, total = 0;
+    const ppMaps = maps.pastpaper || {};
+    Object.keys(scores.pastpapers || {}).forEach(pid => {
+      const map = ppMaps[pid];
+      const rec = scores.pastpapers[pid] || {};
+      if (!map?.questions) {
+        Object.keys(rec).forEach(k => {
+          if (["updatedAt", "_id", "value", "_submitMonth"].includes(k)) return;
+          if (rec[k] !== "" && rec[k] != null) qCount++;
+        });
+        return;
+      }
+      map.questions.forEach(q => {
+        const raw = rec[q.id];
+        if (raw === undefined || raw === null || String(raw).trim() === "") return;
+        qCount++;
+        total += q.max || 1;
+        const sc = quizQuestionScore(q, raw);
+        hit += sc == null ? 0 : sc;
+      });
+    });
+    return { qCount, hitRate: total > 0 ? hit / total : null };
+  }, [scores.pastpapers, maps.pastpaper]);
+
+  const showPP = !isJuniorClass(student) || ppStats.qCount > 0;
+
+  // Combined performance
+  const performance = useMemo(() => {
+    const hwPcts = [];
+    Object.keys(hwMaps).forEach(hid => {
+      const sc = scoreOfRec(hwMaps[hid], scores.homeworks?.[hid]);
+      if (sc) hwPcts.push(sc.pct);
+    });
+    const quizPcts = [];
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const sc = scoreOfRec(m, scores.quizzes?.[id]);
+      if (sc) quizPcts.push(sc.pct);
+    });
+    const examWs = [];
+    Object.entries(maps.exam || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const st = examWeighted(m, scores.exams?.[id], id);
+      if (st) examWs.push(st.weighted / 100);
+    });
+    const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+    const hw = avg(hwPcts), quiz = avg(quizPcts), exam = avg(examWs), pp = ppStats.hitRate;
+    // weights: exam 50, quiz 30, hw 20 (redistribute if missing)
+    let parts = [];
+    if (hw != null) parts.push({ w: 20, v: hw });
+    if (quiz != null) parts.push({ w: 30, v: quiz });
+    if (exam != null) parts.push({ w: 50, v: exam });
+    if (!parts.length && pp != null) parts.push({ w: 100, v: pp });
+    const sumW = parts.reduce((a, p) => a + p.w, 0);
+    const overall = sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null;
+    // exam + pp for DSE estimate
+    let dseParts = [];
+    if (exam != null) dseParts.push(exam);
+    if (pp != null) dseParts.push(pp);
+    const dsePct = dseParts.length ? dseParts.reduce((a, b) => a + b, 0) / dseParts.length : (overall);
+    return { hw, quiz, exam, pp, overall, dsePct, grade: estimateDseLevel(dsePct) };
+  }, [hwMaps, maps, scores, cohort, ppStats]);
+
+  // Domains from all sources
+  const domainPcts = useMemo(() => {
+    const acc = {};
+    Object.keys(DOMAIN_LABELS).forEach(k => { acc[k] = { earned: 0, max: 0 }; });
+    accumulateDomains(hwMaps, scores.homeworks, acc);
+    const qMaps = {};
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => { if (mapVisible(m, cohort)) qMaps[id] = m; });
+    accumulateDomains(qMaps, scores.quizzes, acc);
+    const eMaps = {};
+    Object.entries(maps.exam || {}).forEach(([id, m]) => { if (mapVisible(m, cohort)) eMaps[id] = m; });
+    accumulateDomains(eMaps, scores.exams, acc);
+    accumulateDomains(maps.pastpaper || {}, scores.pastpapers, acc);
+    const pcts = {};
+    Object.keys(acc).forEach(k => {
+      pcts[k] = acc[k].max > 0 ? acc[k].earned / acc[k].max : null;
+    });
+    return pcts;
+  }, [hwMaps, maps, scores, cohort]);
+
+  const title = useMemo(() => pickTitle({
+    overallPct: performance.overall,
+    domainPcts,
+    hwDoneRate: hwStatus.total ? hwStatus.done.length / hwStatus.total : null,
+    ppCount: ppStats.qCount,
+    quizPct: performance.quiz,
+    examPct: performance.exam,
+    missingHw: hwStatus.missing.length,
+    pendingHw: hwStatus.pending.length
+  }), [performance, domainPcts, hwStatus, ppStats]);
+
+  // 各小測得分率（bar chart）
+  const quizBars = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      // 全班未測（未教）不顯示；有教但自己無分仍顯示
+      if (taughtQuizzes && !taughtQuizzes.has(String(id))) return;
+      const sc = scoreOfRec(m, scores.quizzes?.[id]);
+      rows.push({
+        id, title: m.title || id,
+        pct: sc ? Math.round(sc.pct * 100) : null,
+        earned: sc ? sc.earned : null,
+        max: sc ? sc.max : null,
+        missing: !sc
+      });
+    });
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return rows;
+  }, [maps.quiz, scores.quizzes, cohort, taughtQuizzes]);
+
+  // 我的補測（quizMakeup 中有我）
+  const myQuizMakeup = useMemo(() => {
+    const list = [];
+    const all = makeup?.quiz || {};
+    Object.entries(all).forEach(([qid, studentsMap]) => {
+      const entry = studentsMap?.[student.id];
+      if (!entry) return;
+      const map = maps.quiz?.[qid];
+      list.push({
+        id: qid,
+        title: map?.title || qid,
+        status: entry.status || "PENDING",
+        category: entry.category || "",
+        remark: entry.remark || ""
+      });
+    });
+    list.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return list;
+  }, [makeup, maps.quiz, student.id]);
+
+  // 最近一次考試 + 補考進度
+  const latestExam = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.exam || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const st = examWeighted(m, scores.exams?.[id], id);
+      if (!st) return;
+      rows.push({ id, title: m.title || id, weighted: st.weighted, total: st.total, max: st.max });
+    });
+    rows.sort((a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+    return rows[0] || null;
+  }, [maps.exam, scores.exams, cohort]);
+
+  const myExamMakeup = useMemo(() => {
+    const list = [];
+    const all = makeup?.exam || {};
+    Object.entries(all).forEach(([eid, studentsMap]) => {
+      const entry = studentsMap?.[student.id];
+      if (!entry) return;
+      const topics = entry.topics || {};
+      const ids = Object.keys(topics);
+      const done = ids.filter(tid => topics[tid]?.done).length;
+      list.push({
+        id: eid,
+        title: maps.exam?.[eid]?.title || eid,
+        status: entry.status || "PENDING",
+        category: entry.category || "",
+        remark: entry.remark || entry.sessionNote || "",
+        done,
+        total: ids.length,
+        pct: ids.length ? Math.round((done / ids.length) * 100) : 0
+      });
+    });
+    list.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return list;
+  }, [makeup, maps.exam, student.id]);
+
+  // Ranking among cohort peers
+  const ranking = useMemo(() => {
+    if (!cohortPeers?.length || !peerScores) return null;
+    const rows = cohortPeers.map(s => {
+      const ps = peerScores[s.id];
+      if (!ps) return { id: s.id, pct: null };
+      return { id: s.id, pct: ps.overall };
+    }).filter(r => r.pct != null).sort((a, b) => b.pct - a.pct);
+    const idx = rows.findIndex(r => r.id === student.id);
+    if (idx < 0) return null;
+    const rank = idx + 1;
+    const n = rows.length;
+    const percentile = n > 1 ? 1 - idx / (n - 1) : 1; // 1 = top
+    const bottom25 = rank > Math.ceil(n * 0.75);
+    return { rank, n, pct: rows[idx].pct, bottom25, percentile };
+  }, [cohortPeers, peerScores, student.id]);
+
+  useEffect(() => {
+    if (!chartRef.current || typeof Chart === "undefined") return;
+    const labels = [];
+    const data = [];
+    const colors = [
+      "rgba(14, 165, 233, 0.85)",
+      "rgba(99, 102, 241, 0.85)",
+      "rgba(16, 185, 129, 0.85)",
+      "rgba(245, 158, 11, 0.85)",
+      "rgba(244, 63, 94, 0.85)",
+      "rgba(168, 85, 247, 0.85)",
+      "rgba(6, 182, 212, 0.85)"
+    ];
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"].forEach(k => {
+      if (domainPcts[k] != null) {
+        labels.push(DOMAIN_LABELS[k]);
+        data.push(Math.round(domainPcts[k] * 100));
+      }
+    });
+    if (chartInstance.current) chartInstance.current.destroy();
+    if (!labels.length) return;
+
+    const useRadar = labels.length >= 3;
+    if (useRadar) {
+      chartInstance.current = new Chart(chartRef.current.getContext("2d"), {
+        type: "radar",
+        data: {
+          labels,
+          datasets: [{
+            label: "能力值 %",
+            data,
+            backgroundColor: "rgba(56, 189, 248, 0.25)",
+            borderColor: "rgba(14, 165, 233, 0.9)",
+            pointBackgroundColor: "rgba(14, 165, 233, 1)",
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            r: {
+              min: 0, max: 100,
+              ticks: { display: false, stepSize: 20 },
+              pointLabels: { font: { size: 12, weight: "bold" }, color: "#334155" }
+            }
+          },
+          plugins: { legend: { display: false } }
+        }
+      });
+    } else {
+      // 1–2 個領域：Radial gauge（極座標柱狀）
+      chartInstance.current = new Chart(chartRef.current.getContext("2d"), {
+        type: "doughnut",
+        data: {
+          labels,
+          datasets: [{
+            label: "能力值 %",
+            data: data.length === 1 ? [data[0], Math.max(0, 100 - data[0])] : data,
+            backgroundColor: data.length === 1
+              ? [colors[0], "rgba(226, 232, 240, 0.9)"]
+              : data.map((_, i) => colors[i % colors.length]),
+            borderWidth: 0,
+            circumference: 270,
+            rotation: 225
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: "72%",
+          plugins: {
+            legend: { display: data.length > 1, position: "bottom", labels: { font: { size: 12, weight: "bold" } } },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  if (data.length === 1 && ctx.dataIndex === 1) return "";
+                  const v = data.length === 1 ? data[0] : data[ctx.dataIndex];
+                  return `${labels[data.length === 1 ? 0 : ctx.dataIndex]}：${v}%`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+    return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+  }, [domainPcts]);
+
+
+
+  const firstName = student.name || "同學";
+  const overallPctShow = ranking?.pct != null ? Math.round(ranking.pct * 100)
+    : (performance.overall != null ? Math.round(performance.overall * 100) : null);
+
+  return (
+    <div className="space-y-6">
+      {/* Hero — 貼近舊版風格 */}
+      <div className="rounded-[28px] bg-gradient-to-r from-[#3b82f6] via-[#4f46e5] to-[#4338ca] text-white p-6 md:p-8 shadow-xl relative overflow-hidden">
+        <div className="absolute right-0 top-0 w-64 h-64 bg-white/5 rounded-full -mr-20 -mt-20 pointer-events-none" />
+        <div className="relative z-10">
+          <h1 className="text-2xl md:text-[28px] font-black tracking-tight">準備好超越自己了嗎 · {firstName}？</h1>
+          <p className="mt-2 text-blue-100 text-sm md:text-[15px] leading-relaxed max-w-2xl">
+            保持紀律，今天的練習就是明天的 5**。你目前的稱號是
+            <span className="text-amber-300 font-black">「{title}」</span>。
+          </p>
+
+          <div className={`mt-6 grid gap-3 grid-cols-2 ${showPP ? "lg:grid-cols-5" : "lg:grid-cols-3"}`}>
+            {/* 綜合排名 */}
+            <div className="rounded-2xl bg-gradient-to-b from-white/25 to-white/10 border border-white/30 px-4 py-4 backdrop-blur-sm shadow-inner">
+              <div className="text-xs font-bold text-blue-100 flex items-center gap-1">⭐ 綜合排名</div>
+              {ranking && !ranking.bottom25 ? (
+                <div className="text-4xl font-black mt-1 text-amber-300 drop-shadow">#{ranking.rank}</div>
+              ) : overallPctShow != null ? (
+                <div className="text-4xl font-black mt-1 text-amber-300">{overallPctShow}%</div>
+              ) : (
+                <div className="text-3xl font-black mt-1 text-blue-100">—</div>
+              )}
+              <div className="text-xs text-blue-100/90 mt-1">
+                {ranking && !ranking.bottom25
+                  ? `${overallPctShow != null ? overallPctShow + "%" : ""} · 全組 ${ranking.n} 人`
+                  : ranking ? "繼續努力" : "綜合得分率"}
+              </div>
+            </div>
+
+            {/* 大考預估 — 獨立放大 */}
+            <div className="rounded-2xl bg-gradient-to-b from-amber-400/30 to-white/10 border border-amber-200/40 px-4 py-4 backdrop-blur-sm">
+              <div className="text-xs font-bold text-amber-100">🎯 大考預估</div>
+              <div className={`mt-2 text-4xl md:text-5xl font-black inline-block px-3 py-1 rounded-xl border-2 bg-white/95 ${performance.grade.color}`}>
+                {performance.grade.level}
+              </div>
+              <div className="text-[11px] text-blue-100 mt-2">
+                {performance.dsePct != null ? `參考得分率 ${Math.round(performance.dsePct * 100)}%` : "考試 + Pastpaper"}
+              </div>
+            </div>
+
+            {showPP && (
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+                <div className="text-xs font-bold text-blue-100">PASTPAPER 題數</div>
+                <div className="text-4xl font-black mt-1">{ppStats.qCount}</div>
+                <div className="text-xs text-blue-100/80 mt-1">已練習題目</div>
+              </div>
+            )}
+            {showPP && (
+              <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+                <div className="text-xs font-bold text-blue-100">PP 命中率</div>
+                <div className="text-4xl font-black mt-1">
+                  {ppStats.hitRate != null ? Math.round(ppStats.hitRate * 100) + "%" : "—"}
+                </div>
+                <div className="text-xs text-blue-100/80 mt-1">歷屆得分率</div>
+              </div>
+            )}
+
+            <div className="rounded-2xl bg-white/10 border border-white/20 px-4 py-4">
+              <div className="text-xs font-bold text-blue-100">稱號</div>
+              <div className="text-xl md:text-2xl font-black mt-2 text-amber-300 leading-snug">{title}</div>
+              <div className="text-[11px] text-blue-100/80 mt-2">功課 · 小測 · 考試 · PP</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 雷達 */}
+      <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-6">
+        <div className="font-bold text-slate-700 text-[15px] flex items-center gap-2">
+          <span className="text-sky-500 text-lg">📊</span>
+          我的領域能力值
+          <span className="text-xs font-normal text-slate-400">功課 + 小測 + 考試 + Pastpaper · 少於 3 領域用圓環圖</span>
+        </div>
+        <div className="h-80 mt-2"><canvas ref={chartRef} /></div>
+      </div>
+
+      {/* 下方卡片列 */}
+      <div className="grid lg:grid-cols-3 gap-4">
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-xl">📘</div>
+            <div className="font-bold text-slate-800">日常功課狀態</div>
+          </div>
+          <div className="text-3xl font-black text-indigo-600">
+            {hwStatus.done.length}
+            <span className="text-base text-slate-400 font-bold"> / {hwStatus.total} 份已改正</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!!hwStatus.missing.length && (
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-rose-500 text-white shadow animate-pulse">⚠️ 欠交 {hwStatus.missing.length}</span>
+            )}
+            {!!hwStatus.pending.length && (
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200">待改正 {hwStatus.pending.length}</span>
+            )}
+            {!!hwStatus.perfect.length && (
+              <span className="text-xs font-black px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100">完美 {hwStatus.perfect.length}</span>
+            )}
+          </div>
+          <div className="divide-y divide-slate-100 max-h-96 overflow-auto">
+            {!hwStatus.missing.length && !hwStatus.pending.length && hwStatus.done.length > 0 && (
+              <p className="text-sm text-emerald-600 font-bold py-2">全部跟進中的功課已改正 👍</p>
+            )}
+            {[...hwStatus.missing, ...hwStatus.pending].map(item => (
+              <div key={item.id} className={`py-3 px-2 rounded-xl my-1 ${item.status === "MISSING" ? "bg-rose-50 border border-rose-200" : "bg-amber-50/50 border border-amber-100"}`}>
+                <div className="flex justify-between gap-2 items-start">
+                  <div className="font-bold text-sm text-slate-800">{item.title}</div>
+                  <div className={`text-xs font-black shrink-0 px-2 py-0.5 rounded-lg ${item.status === "MISSING" ? "bg-rose-500 text-white" : "bg-amber-200 text-amber-900"}`}>
+                    {item.status === "MISSING" ? "欠交" : "未改正"}
+                    {item.scoreText ? ` (${item.scoreText})` : ""}
+                  </div>
+                </div>
+                {!!item.topics.length && (
+                  <div className="text-[11px] text-slate-600 mt-1 leading-relaxed">內容：{item.topics.join("、")}</div>
+                )}
+              </div>
+            ))}
+            {hwStatus.done.slice(0, 5).map(item => (
+              <div key={item.id} className="py-2 opacity-70">
+                <div className="flex justify-between gap-2 text-sm">
+                  <span className="font-semibold text-slate-600">{item.title}</span>
+                  <span className="text-xs font-bold text-emerald-600">
+                    {item.status === "PERFECT" ? "完美" : "已改正"}
+                    {item.scoreText ? ` (${item.scoreText})` : ""}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {!hwStatus.total && (
+              <p className="text-sm text-slate-400 py-6 text-center">此群組暫時沒有指派功課</p>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5">
+          <div className="text-sm font-bold text-slate-500 mb-3">課堂小測</div>
+          {performance.quiz != null ? (
+            <>
+              <div className="text-4xl font-black text-slate-800">{Math.round(performance.quiz * 100)}%</div>
+              <div className="text-xs text-slate-400 mt-1 mb-3">平均得分率</div>
+              <div className="space-y-2 max-h-40 overflow-auto">
+                {quizBars.map(q => (
+                  <div key={q.id}>
+                    <div className="flex justify-between text-[11px] font-bold mb-0.5">
+                      <span className="text-slate-600 truncate mr-2">{q.title}</span>
+                      <span className={q.missing ? "text-slate-400" : q.pct >= 60 ? "text-emerald-600" : "text-rose-600"}>
+                        {q.missing ? "未測" : q.pct + "%"}
+                      </span>
+                    </div>
+                    <div className="h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                      <div className={`h-full rounded-full ${q.missing ? "bg-slate-200" : q.pct >= 70 ? "bg-emerald-500" : q.pct >= 50 ? "bg-amber-400" : "bg-rose-400"}`}
+                        style={{ width: (q.missing ? 0 : Math.min(100, q.pct)) + "%" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="text-slate-400 text-sm py-6 text-center">尚無小測成績</div>
+          )}
+          {!!myQuizMakeup.length && (
+            <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
+              <div className="text-xs font-black text-violet-700">補測進度</div>
+              {myQuizMakeup.map(mk => (
+                <div key={mk.id} className={`rounded-xl px-3 py-2 text-xs font-bold border ${mk.status === "DONE" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-violet-50 border-violet-200 text-violet-900"}`}>
+                  <div className="flex justify-between gap-2">
+                    <span className="truncate">{mk.title}</span>
+                    <span>{mk.status === "DONE" ? "已完成 ✓" : "進行中"}</span>
+                  </div>
+                  {mk.category && <div className="text-[10px] font-semibold opacity-70 mt-0.5">{mk.category === "FAIL" ? "不合格補測" : "缺席／無測補測"}</div>}
+                  {mk.remark && <div className="text-[10px] font-normal mt-0.5 text-slate-600">{mk.remark}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-[28px] border border-slate-100 shadow-sm p-5">
+          <div className="text-sm font-bold text-slate-500 mb-3">考試</div>
+          {latestExam ? (
+            <>
+              <div className="text-xs font-bold text-slate-400">最近一次</div>
+              <div className="font-black text-slate-800 text-base mt-0.5 truncate">{latestExam.title}</div>
+              <div className="text-4xl font-black text-slate-800 mt-2">{latestExam.weighted.toFixed(1)}
+                <span className="text-lg text-slate-400 font-bold"> / 100</span>
+              </div>
+              <div className="text-xs text-slate-400 mt-1">
+                卷面 {Math.round(latestExam.total)}/{Math.round(latestExam.max)}
+                {performance.exam != null && ` · 平均加權 ${Math.round(performance.exam * 100)}`}
+              </div>
+            </>
+          ) : (
+            <div className="text-slate-400 text-sm py-6 text-center">尚無考試成績</div>
+          )}
+          {!!myExamMakeup.length && (
+            <div className="mt-4 pt-3 border-t border-slate-100 space-y-2">
+              <div className="text-xs font-black text-rose-700">補考進度</div>
+              {myExamMakeup.map(mk => (
+                <div key={mk.id} className={`rounded-xl px-3 py-2 border ${mk.status === "DONE" ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
+                  <div className="flex justify-between gap-2 text-xs font-bold">
+                    <span className="truncate text-slate-800">{mk.title}</span>
+                    <span className={mk.status === "DONE" ? "text-emerald-700" : "text-rose-700"}>
+                      {mk.status === "DONE" ? "已完成 ✓" : `${mk.done}/${mk.total || "—"}`}
+                    </span>
+                  </div>
+                  {mk.total > 0 && (
+                    <div className="mt-1.5 h-2 rounded-full bg-white overflow-hidden border border-rose-100">
+                      <div className={`h-full rounded-full ${mk.pct >= 100 ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: mk.pct + "%" }} />
+                    </div>
+                  )}
+                  {mk.remark && <div className="text-[10px] text-slate-600 mt-1">{mk.remark}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function SchoolProgressView({ student, maps, scores, makeup, taughtQuizzes, onGoAi }) {
+  const cohort = student.cohort || "";
+  const [section, setSection] = useState("hw"); // hw | quiz | exam
+
+  const hwRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.homework || {}).forEach(([id, m]) => {
+      if (!homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) return;
+      const rec = scores.homeworks?.[id] || {};
+      const status = rec.remakeStatus || (!rec.scores || !Object.keys(rec.scores || {}).length ? "MISSING" : "PENDING");
+      const sc = scoreOfRec(m, rec);
+      const topics = (m.questions || []).map(q => q.topicDesc || q.topicId || "").filter(Boolean);
+      rows.push({
+        id, title: m.title || id, status, sc,
+        topics: Array.from(new Set(topics)).slice(0, 8),
+        remakeDate: rec.remakeDate || "",
+        remarks: rec.remarks || ""
+      });
+    });
+    const order = { MISSING: 0, ABSENT: 0, PENDING: 1, DONE: 2, PERFECT: 3, EXEMPT: 4 };
+    rows.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || String(a.id).localeCompare(String(b.id)));
+    return rows;
+  }, [maps.homework, scores.homeworks, cohort]);
+
+  const quizRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      // 全班未測不顯示；班上有人有分而自己無分 → 仍顯示「未測／無分」
+      if (taughtQuizzes && !taughtQuizzes.has(String(id))) return;
+      const sc = scoreOfRec(m, scores.quizzes?.[id]);
+      const mk = makeup?.quiz?.[id]?.[student.id];
+      rows.push({
+        id,
+        title: m.title || id,
+        sc,
+        mk: mk ? { status: mk.status || "PENDING", category: mk.category || "", remark: mk.remark || "" } : null
+      });
+    });
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return rows;
+  }, [maps.quiz, scores.quizzes, makeup, cohort, student.id, taughtQuizzes]);
+
+  const examRows = useMemo(() => {
+    const rows = [];
+    Object.entries(maps.exam || {}).forEach(([id, m]) => {
+      if (!mapVisible(m, cohort)) return;
+      const st = examWeighted(m, scores.exams?.[id], id);
+      const mk = makeup?.exam?.[id]?.[student.id];
+      let mkInfo = null;
+      if (mk) {
+        const topics = mk.topics || {};
+        const ids = Object.keys(topics);
+        const done = ids.filter(tid => topics[tid]?.done).length;
+        mkInfo = {
+          status: mk.status || "PENDING",
+          done, total: ids.length,
+          pct: ids.length ? Math.round((done / ids.length) * 100) : 0,
+          remark: mk.remark || mk.sessionNote || ""
+        };
+      }
+      rows.push({
+        id,
+        title: m.title || id,
+        st,
+        grade: st ? estimateDseLevel(st.weighted / 100) : null,
+        mk: mkInfo
+      });
+    });
+    rows.sort((a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+    return rows;
+  }, [maps.exam, scores.exams, makeup, cohort, student.id]);
+
+  const hwSummary = useMemo(() => {
+    const missing = hwRows.filter(r => r.status === "MISSING" || r.status === "ABSENT").length;
+    const pending = hwRows.filter(r => r.status === "PENDING").length;
+    const done = hwRows.filter(r => r.status === "DONE" || r.status === "PERFECT").length;
+    return { missing, pending, done, total: hwRows.length };
+  }, [hwRows]);
+
+  const statusStyle = (st) => {
+    if (st === "MISSING" || st === "ABSENT") return "bg-rose-500 text-white";
+    if (st === "PENDING") return "bg-amber-400 text-amber-950";
+    if (st === "PERFECT") return "bg-emerald-500 text-white";
+    if (st === "DONE") return "bg-sky-500 text-white";
+    if (st === "EXEMPT") return "bg-slate-300 text-slate-700";
+    return "bg-slate-200 text-slate-700";
+  };
+  const statusLabel = (st) => ({
+    MISSING: "欠交", ABSENT: "欠交", PENDING: "待改正", DONE: "已改正", PERFECT: "完美", EXEMPT: "豁免"
+  }[st] || st);
+
+  const tabs = [
+    { id: "hw", label: "功課", count: hwRows.length },
+    { id: "quiz", label: "小測", count: quizRows.length },
+    { id: "exam", label: "考試", count: examRows.length }
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap justify-between gap-3 items-start">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800">校內進度</h2>
+          <p className="text-base text-slate-500 mt-1">功課 · 小測 · 考試詳情（只顯示與你相關的項目）</p>
+        </div>
+        <button type="button" onClick={() => onGoAi && onGoAi(section === "quiz" ? "quiz" : section === "exam" ? "exam" : "hw")}
+          className="text-base font-black px-5 py-2.5 rounded-2xl bg-violet-600 text-white shadow hover:bg-violet-700">
+          ✨ AI 溫習
+        </button>
+      </div>
+
+      {/* 總覽數字 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-white rounded-2xl border p-4 shadow-sm">
+          <div className="text-sm font-bold text-slate-500">功課總數</div>
+          <div className="text-3xl font-black text-indigo-700 mt-1">{hwSummary.total}</div>
+        </div>
+        <div className={`rounded-2xl border p-4 shadow-sm ${hwSummary.missing ? "bg-rose-50 border-rose-200" : "bg-white"}`}>
+          <div className="text-sm font-bold text-slate-500">欠交</div>
+          <div className={`text-3xl font-black mt-1 ${hwSummary.missing ? "text-rose-600" : "text-slate-400"}`}>{hwSummary.missing}</div>
+        </div>
+        <div className={`rounded-2xl border p-4 shadow-sm ${hwSummary.pending ? "bg-amber-50 border-amber-200" : "bg-white"}`}>
+          <div className="text-sm font-bold text-slate-500">待改正</div>
+          <div className={`text-3xl font-black mt-1 ${hwSummary.pending ? "text-amber-700" : "text-slate-400"}`}>{hwSummary.pending}</div>
+        </div>
+        <div className="bg-white rounded-2xl border p-4 shadow-sm">
+          <div className="text-sm font-bold text-slate-500">已改正</div>
+          <div className="text-3xl font-black text-emerald-600 mt-1">{hwSummary.done}</div>
+        </div>
+      </div>
+
+      {/* 分頁 */}
+      <div className="flex gap-2 flex-wrap">
+        {tabs.map(tb => (
+          <button key={tb.id} type="button" onClick={() => setSection(tb.id)}
+            className={`px-5 py-2.5 rounded-2xl text-base font-black border-2 transition ${section === tb.id ? "bg-indigo-600 text-white border-indigo-600 shadow" : "bg-white text-slate-600 border-slate-200 hover:border-indigo-300"}`}>
+            {tb.label} <span className="opacity-80">({tb.count})</span>
+          </button>
+        ))}
+      </div>
+
+      {/* 功課列表 */}
+      {section === "hw" && (
+        <div className="space-y-3">
+          {!hwRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無相關功課</div>
+          )}
+          {hwRows.map(row => (
+            <div key={row.id} className={`bg-white rounded-2xl border shadow-sm p-5 ${row.status === "MISSING" || row.status === "ABSENT" ? "border-rose-300 ring-1 ring-rose-100" : row.status === "PENDING" ? "border-amber-200" : "border-slate-100"}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono mt-0.5">{row.id}</div>
+                </div>
+                <span className={`text-sm font-black px-3 py-1.5 rounded-xl ${statusStyle(row.status)}`}>
+                  {statusLabel(row.status)}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-4 text-base">
+                {row.sc ? (
+                  <div>
+                    <span className="text-slate-500 font-bold">得分 </span>
+                    <span className="font-black text-slate-800 text-xl">{Math.round(row.sc.earned)}</span>
+                    <span className="text-slate-400 font-bold"> / {Math.round(row.sc.max)}</span>
+                    <span className={`ml-2 font-black ${row.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {Math.round(row.sc.pct * 100)}%
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-slate-400 font-bold">尚未有分數</div>
+                )}
+                {row.remakeDate && <div className="text-slate-500"><span className="font-bold">改正日</span> {row.remakeDate}</div>}
+              </div>
+              {!!row.topics.length && (
+                <div className="mt-3 text-sm text-slate-600 leading-relaxed">
+                  <span className="font-bold text-slate-500">內容：</span>{row.topics.join("、")}
+                </div>
+              )}
+              {row.remarks && (
+                <div className="mt-2 text-sm text-indigo-700 bg-indigo-50 rounded-xl px-3 py-2 font-semibold">{row.remarks}</div>
+              )}
+              {row.sc && row.sc.max > 0 && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.sc.pct >= 0.7 ? "bg-emerald-500" : row.sc.pct >= 0.5 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.sc.pct * 100)) + "%" }} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 小測列表 */}
+      {section === "quiz" && (
+        <div className="space-y-3">
+          {!quizRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無小測</div>
+          )}
+          {quizRows.map(row => (
+            <div key={row.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+              <div className="flex flex-wrap justify-between gap-3 items-start">
+                <div>
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono">{row.id}</div>
+                </div>
+                {row.sc ? (
+                  <div className="text-right">
+                    <div className="text-2xl font-black text-slate-800">{Math.round(row.sc.earned)}
+                      <span className="text-base text-slate-400">/{Math.round(row.sc.max)}</span>
+                    </div>
+                    <div className={`text-base font-black ${row.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {Math.round(row.sc.pct * 100)}%
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-base font-black text-slate-400 bg-slate-100 px-3 py-1.5 rounded-xl">未測／無分</span>
+                )}
+              </div>
+              {row.sc && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.sc.pct >= 0.7 ? "bg-emerald-500" : row.sc.pct >= 0.5 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.sc.pct * 100)) + "%" }} />
+                </div>
+              )}
+              {row.mk && (
+                <div className={`mt-4 rounded-xl px-4 py-3 border text-base font-bold ${row.mk.status === "DONE" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-violet-50 border-violet-200 text-violet-900"}`}>
+                  <div className="flex justify-between gap-2">
+                    <span>補測 · {row.mk.category === "FAIL" ? "不合格" : "缺席／無測"}</span>
+                    <span>{row.mk.status === "DONE" ? "已完成 ✓" : "進行中"}</span>
+                  </div>
+                  {row.mk.remark && <div className="text-sm font-semibold text-slate-600 mt-1">{row.mk.remark}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 考試列表 */}
+      {section === "exam" && (
+        <div className="space-y-3">
+          {!examRows.length && (
+            <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無考試</div>
+          )}
+          {examRows.map(row => (
+            <div key={row.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+              <div className="flex flex-wrap justify-between gap-3 items-start">
+                <div>
+                  <div className="text-lg font-black text-slate-800">{row.title}</div>
+                  <div className="text-sm text-slate-400 mono">{row.id}</div>
+                </div>
+                {row.st ? (
+                  <div className="text-right">
+                    <div className="text-3xl font-black text-slate-800">{row.st.weighted.toFixed(1)}
+                      <span className="text-lg text-slate-400"> / 100</span>
+                    </div>
+                    <div className="text-sm text-slate-500 font-bold mt-0.5">
+                      卷面 {Math.round(row.st.total)}/{Math.round(row.st.max)}
+                    </div>
+                    {row.grade && (
+                      <span className={`inline-block mt-2 text-sm font-black px-2.5 py-1 rounded-lg border ${row.grade.color}`}>
+                        模擬 {row.grade.level}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-base font-black text-slate-400 bg-slate-100 px-3 py-1.5 rounded-xl">未入分</span>
+                )}
+              </div>
+              {row.st && (
+                <div className="mt-3 h-3 rounded-full bg-slate-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${row.st.weighted >= 70 ? "bg-emerald-500" : row.st.weighted >= 50 ? "bg-amber-400" : "bg-rose-400"}`}
+                    style={{ width: Math.min(100, Math.round(row.st.weighted)) + "%" }} />
+                </div>
+              )}
+              {row.mk && (
+                <div className={`mt-4 rounded-xl px-4 py-3 border ${row.mk.status === "DONE" ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
+                  <div className="flex justify-between gap-2 text-base font-black">
+                    <span className="text-slate-800">補考進度</span>
+                    <span className={row.mk.status === "DONE" ? "text-emerald-700" : "text-rose-700"}>
+                      {row.mk.status === "DONE" ? "已完成 ✓" : `${row.mk.done}/${row.mk.total}`}
+                    </span>
+                  </div>
+                  {row.mk.total > 0 && (
+                    <div className="mt-2 h-3 rounded-full bg-white overflow-hidden border">
+                      <div className={`h-full rounded-full ${row.mk.pct >= 100 ? "bg-emerald-500" : "bg-rose-400"}`} style={{ width: row.mk.pct + "%" }} />
+                    </div>
+                  )}
+                  {row.mk.remark && <div className="text-sm text-slate-600 mt-2 font-semibold">{row.mk.remark}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+function shortPastpaperQLabel(qid, type) {
+  const s = String(qid || "");
+  // 2025-MC-01 / 2025-MC-E3-01 → Q.1 ; 2025-LQ-01a → Q.1a
+  let m = s.match(/(?:MC|LQ)[-_]?(?:E\d[-_]?)?0*(\d+[a-z]*)$/i);
+  if (m) return "Q." + m[1];
+  m = s.match(/0*(\d+[a-z]*)$/i);
+  if (m) return "Q." + m[1];
+  return s;
+}
+function parsePastpaperMeta(paperId, map) {
+  const id = String(paperId || "");
+  const title = (map && map.title) || id;
+  let year = null;
+  const ym = id.match(/(20\d{2})/) || title.match(/(20\d{2})/);
+  if (ym) year = ym[1];
+  let kind = "OTHER";
+  const u = (id + " " + title).toUpperCase();
+  if (/P1A|PAPER\s*1A|1A\s*\(MC\)|\bMC\b/.test(u) && /1A|PAPER\s*1A/.test(u)) kind = "P1A";
+  else if (/P1B|PAPER\s*1B|1B\s*\(/.test(u)) kind = "P1B";
+  else if (/P2|PAPER\s*2/.test(u)) kind = "P2";
+  else if (/P1A|1A/.test(u)) kind = "P1A";
+  else if (/P1B|1B/.test(u)) kind = "P1B";
+  return { year, kind };
+}
+
+/** 年份綜合（公開試權重）：Paper1 60% + Paper2 20% + SBA 20%（本系統不計 SBA）
+ *  顯示用：將已有的 60/20 化算回 100 分制 → raw / weightSum
+ *  例：只有 P1+P2 → (0.6*p1 + 0.2*p2) / 0.8
+ */
+function yearCompositeScore(parts) {
+  const p1e = (parts.P1A?.earned || 0) + (parts.P1B?.earned || 0);
+  const p1m = (parts.P1A?.max || 0) + (parts.P1B?.max || 0);
+  const p2e = parts.P2?.earned || 0;
+  const p2m = parts.P2?.max || 0;
+  const hasP1 = p1m > 0;
+  const hasP2 = p2m > 0;
+  if (!hasP1 && !hasP2) return null;
+  const p1pct = hasP1 ? p1e / p1m : null;
+  const p2pct = hasP2 ? p2e / p2m : null;
+  let raw = 0, wSum = 0;
+  if (hasP1) { raw += p1pct * 0.6; wSum += 0.6; }
+  if (hasP2) { raw += p2pct * 0.2; wSum += 0.2; }
+  const pct = wSum > 0 ? raw / wSum : null;
+  return {
+    pct,
+    p1pct, p2pct,
+    p1e, p1m, p2e, p2m,
+    weightNote: "P1 60% + P2 20%（SBA 20% 不計，已化算回 100）",
+    grade: estimateDseLevel(pct)
+  };
+}
+
+function PastpaperStudentView({ student, maps, scores, setScores, onGoAi }) {
+  const ppMaps = maps.pastpaper || {};
+  const [yearFilter, setYearFilter] = useState("ALL");
+  const [editPaperId, setEditPaperId] = useState("");
+  const [draft, setDraft] = useState({});
+  const [saveStatus, setSaveStatus] = useState("");
+  const [domainByYear, setDomainByYear] = useState({});
+  const chartRefs = useRef({});
+  const chartInst = useRef({});
+  const saveTimer = useRef(null);
+
+  const paperList = useMemo(() => {
+    return Object.keys(ppMaps).map(id => {
+      const meta = parsePastpaperMeta(id, ppMaps[id]);
+      return { id, map: ppMaps[id], ...meta, title: ppMaps[id]?.title || id };
+    }).sort((a, b) => String(b.year || "").localeCompare(String(a.year || "")) || String(a.kind).localeCompare(String(b.kind)) || String(a.id).localeCompare(String(b.id)));
+  }, [ppMaps]);
+
+  const years = useMemo(() => {
+    const s = new Set(paperList.map(p => p.year).filter(Boolean));
+    return Array.from(s).sort((a, b) => b.localeCompare(a));
+  }, [paperList]);
+
+  const scoreOfPaper = (paperId) => {
+    const map = ppMaps[paperId];
+    const rec = scores.pastpapers?.[paperId] || {};
+    if (!map?.questions?.length) return null;
+    let earned = 0, max = 0, any = false, answered = 0;
+    map.questions.forEach(q => {
+      max += q.max || 1;
+      const raw = rec[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      any = true;
+      answered++;
+      const sc = quizQuestionScore(q, raw);
+      earned += sc == null ? 0 : sc;
+    });
+    if (!any) return null;
+    return { earned, max, pct: max > 0 ? earned / max : 0, answered, totalQ: map.questions.length };
+  };
+
+  const yearGroups = useMemo(() => {
+    const byYear = {};
+    paperList.forEach(p => {
+      if (!p.year) return;
+      if (yearFilter !== "ALL" && p.year !== yearFilter) return;
+      if (!byYear[p.year]) byYear[p.year] = { year: p.year, papers: [], parts: {} };
+      const sc = scoreOfPaper(p.id);
+      byYear[p.year].papers.push({ ...p, sc });
+      if (sc && (p.kind === "P1A" || p.kind === "P1B" || p.kind === "P2")) {
+        byYear[p.year].parts[p.kind] = { earned: sc.earned, max: sc.max };
+      }
+    });
+    Object.values(byYear).forEach(g => {
+      g.composite = yearCompositeScore(g.parts);
+      g.doneCount = g.papers.filter(x => x.sc).length;
+    });
+    return Object.values(byYear).sort((a, b) => b.year.localeCompare(a.year));
+  }, [paperList, scores.pastpapers, yearFilter]);
+
+  // domain radar data per year
+  useEffect(() => {
+    const out = {};
+    yearGroups.forEach(g => {
+      const acc = {};
+      Object.keys(DOMAIN_LABELS).forEach(k => { acc[k] = { earned: 0, max: 0 }; });
+      g.papers.forEach(p => {
+        if (!p.sc) return;
+        const rec = scores.pastpapers?.[p.id] || {};
+        const map = p.map;
+        if (!map?.questions) return;
+        map.questions.forEach(q => {
+          const raw = rec[q.id];
+          if (raw === undefined || raw === null || String(raw).trim() === "") return;
+          const dk = domainFromTopicId(q.topicId);
+          if (!dk || !acc[dk]) return;
+          const sc = quizQuestionScore(q, raw);
+          if (sc == null) return;
+          acc[dk].max += q.max || 1;
+          acc[dk].earned += sc;
+        });
+      });
+      const labels = [], data = [];
+      ["1", "2", "3", "4", "5"].forEach(k => {
+        if (acc[k].max > 0) {
+          labels.push(DOMAIN_LABELS[k]);
+          data.push(Math.round((acc[k].earned / acc[k].max) * 100));
+        }
+      });
+      out[g.year] = { labels, data };
+    });
+    setDomainByYear(out);
+  }, [yearGroups, scores.pastpapers]);
+
+  useEffect(() => {
+    if (typeof Chart === "undefined") return;
+    Object.keys(domainByYear).forEach(year => {
+      const canvas = chartRefs.current[year];
+      if (!canvas) return;
+      const { labels, data } = domainByYear[year];
+      if (chartInst.current[year]) chartInst.current[year].destroy();
+      if (!labels?.length) return;
+      chartInst.current[year] = new Chart(canvas.getContext("2d"), {
+        type: "radar",
+        data: {
+          labels,
+          datasets: [{
+            data,
+            backgroundColor: "rgba(99,102,241,0.2)",
+            borderColor: "rgba(79,70,229,0.85)",
+            pointBackgroundColor: "rgba(79,70,229,1)",
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: { r: { min: 0, max: 100, ticks: { display: false }, pointLabels: { font: { size: 11, weight: "bold" } } } },
+          plugins: { legend: { display: false } }
+        }
+      });
+    });
+    return () => {
+      Object.values(chartInst.current).forEach(c => { try { c.destroy(); } catch (e) {} });
+    };
+  }, [domainByYear]);
+
+  const openEdit = (paperId) => {
+    const rec = scores.pastpapers?.[paperId] || {};
+    const map = ppMaps[paperId];
+    const d = {};
+    (map?.questions || []).forEach(q => {
+      d[q.id] = rec[q.id] != null ? String(rec[q.id]) : "";
+    });
+    setDraft(d);
+    setEditPaperId(paperId);
+    setSaveStatus("");
+    setTimeout(() => {
+      const panel = document.getElementById("pp-edit-panel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      const first = panel && panel.querySelector("[data-pp-qid]");
+      if (first) first.focus();
+    }, 80);
+  };
+
+  const scheduleSave = (paperId, nextDraft) => {
+    setSaveStatus("儲存中…");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        const record = { ...nextDraft };
+        // strip empty
+        Object.keys(record).forEach(k => {
+          if (record[k] === "" || record[k] == null) delete record[k];
+        });
+        await savePastpaperScore(student.id, paperId, record);
+        setScores(prev => ({
+          ...prev,
+          pastpapers: { ...prev.pastpapers, [paperId]: { ...record, updatedAt: new Date().toISOString() } }
+        }));
+        // 學生自助入分後標記 summary 需重建（背景）
+        try {
+          await db.collection("scoreSummary").doc(student.id).set({ needsRebuild: true, updatedAt: new Date().toISOString() }, { merge: true });
+          __summaryCache.delete(student.id);
+        } catch (e) {}
+        setSaveStatus("已儲存");
+      } catch (e) {
+        setSaveStatus("失敗: " + e.message);
+      }
+    }, 600);
+  };
+
+  const jumpToNextQ = (qid) => {
+    const map = editPaperId ? ppMaps[editPaperId] : null;
+    const qs = map?.questions || [];
+    const idx = qs.findIndex(q => q.id === qid);
+    if (idx < 0 || idx >= qs.length - 1) return;
+    const nextId = qs[idx + 1].id;
+    setTimeout(() => {
+      const el = document.querySelector(`[data-pp-qid="${CSS.escape(nextId)}"]`);
+      if (el) {
+        el.focus();
+        if (typeof el.select === "function") el.select();
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }, 40);
+  };
+
+  const setAns = (qid, val, opts = {}) => {
+    const next = { ...draft, [qid]: val };
+    setDraft(next);
+    scheduleSave(editPaperId, next);
+    if (opts.jumpNext) jumpToNextQ(qid);
+  };
+
+  const editMap = editPaperId ? ppMaps[editPaperId] : null;
+  const editMeta = editPaperId ? parsePastpaperMeta(editPaperId, editMap) : null;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap justify-between gap-3 items-end">
+        <div>
+          <h2 className="text-2xl font-black text-slate-800">歷屆試題</h2>
+          <p className="text-base text-slate-500 mt-1">自行輸入分數 · 按年份睇表現與等級預估（P1 60% + P2 20%，化算回 100；SBA 不計）</p>
+        </div>
+        <button type="button" onClick={() => onGoAi && onGoAi("pp")}
+          className="text-base font-black px-5 py-2.5 rounded-2xl bg-violet-600 text-white shadow hover:bg-violet-700">
+          ✨ AI 溫習
+        </button>
+        <label className="text-sm font-bold text-slate-600">年份
+          <select className="ml-2 border-2 rounded-xl px-3 py-2 text-base font-bold" value={yearFilter} onChange={e => setYearFilter(e.target.value)}>
+            <option value="ALL">全部年份</option>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {/* 輸入面板 */}
+      {editPaperId && editMap && (
+        <div id="pp-edit-panel" className="bg-white rounded-3xl border-2 border-indigo-200 shadow-lg p-5 space-y-4 scroll-mt-4">
+          <div className="flex flex-wrap justify-between gap-3 items-start">
+            <div>
+              <div className="text-lg font-black text-indigo-900">{editMap.title || editPaperId}</div>
+              <div className="text-sm text-slate-500 mt-0.5">{editPaperId} · {editMeta?.year || "—"} · {editMeta?.kind}</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-bold text-slate-500">{saveStatus}</span>
+              <button type="button" className="text-base font-bold text-slate-600 border px-3 py-1.5 rounded-xl" onClick={() => setEditPaperId("")}>關閉</button>
+            </div>
+          </div>
+          <p className="text-sm text-slate-500">自動儲存。MC 填字母即跳下一題；長題填完按 Enter 或離開格會跳下一題。</p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[55vh] overflow-auto">
+            {(editMap.questions || []).map(q => {
+              const raw = draft[q.id] ?? "";
+              const has = String(raw).trim() !== "";
+              const isMc = q.type === "MC";
+              let color = "border-slate-200 bg-white";
+              if (has && isMc) {
+                const ok = q.ans && q.ans.toString().split(",").map(a => a.trim().toUpperCase()).includes(String(raw).trim().toUpperCase());
+                color = ok ? "border-emerald-400 bg-emerald-50" : "border-rose-400 bg-rose-50";
+              } else if (has && !isMc) {
+                const n = parseFloat(raw);
+                if (!isNaN(n) && n <= 0) color = "border-rose-300 bg-rose-50";
+                else if (!isNaN(n) && n >= (q.max || 0)) color = "border-emerald-400 bg-emerald-50";
+                else color = "border-amber-300 bg-amber-50";
+              }
+              const ansShow = isMc && q.ans ? String(q.ans).toUpperCase() : null;
+              return (
+                <div key={q.id} className={`rounded-xl border-2 p-3 ${color}`}>
+                  <div className="flex justify-between gap-2 items-start">
+                    <span className="text-base font-black text-indigo-800">{shortPastpaperQLabel(q.id, q.type)}</span>
+                    <span className="text-xl font-black text-slate-700 tabular-nums">/{q.max || 1}</span>
+                  </div>
+                  {ansShow && (
+                    <div className="mt-1 text-sm font-black text-emerald-700">正解 {ansShow}</div>
+                  )}
+                  {q.topicDesc && <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{q.topicDesc}</div>}
+                  <input
+                    data-pp-qid={q.id}
+                    className="mt-2 w-full border-2 rounded-lg px-3 py-2.5 text-xl font-black text-center uppercase"
+                    value={raw}
+                    placeholder={isMc ? "A-D" : "0"}
+                    inputMode={isMc ? "text" : "decimal"}
+                    onChange={e => {
+                      if (isMc) {
+                        const v = e.target.value.toUpperCase().replace(/[^A-D]/g, "").slice(0, 1);
+                        setAns(q.id, v, { jumpNext: v.length === 1 });
+                      } else {
+                        setAns(q.id, e.target.value, { jumpNext: false });
+                      }
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        const v = e.target.value;
+                        setAns(q.id, v, { jumpNext: true });
+                      }
+                    }}
+                    onBlur={e => {
+                      if (!isMc && String(e.target.value).trim() !== "") {
+                        jumpToNextQ(q.id);
+                      }
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 按年總覽 */}
+      {!yearGroups.length && (
+        <div className="bg-white rounded-2xl border border-dashed p-12 text-center text-slate-400 text-lg">暫無歷屆試卷題庫</div>
+      )}
+      {yearGroups.map(g => (
+        <div key={g.year} className="bg-white rounded-3xl border border-indigo-100 shadow-sm overflow-hidden">
+          <div className="p-5 md:p-6 flex flex-wrap justify-between gap-4 items-start border-b border-slate-100">
+            <div>
+              <h3 className="text-2xl font-black text-slate-800">{g.year} 年 DSE</h3>
+              <span className="inline-block mt-2 text-sm font-bold px-3 py-1 rounded-xl bg-indigo-50 text-indigo-700">
+                已完成 {g.doneCount} 份卷
+              </span>
+              {g.composite && (
+                <div className="mt-2 text-sm text-slate-500 font-semibold">
+                  {g.composite.p1m > 0 && <span>Paper1 {Math.round(g.composite.p1pct * 100)}%（{Math.round(g.composite.p1e)}/{Math.round(g.composite.p1m)}）</span>}
+                  {g.composite.p1m > 0 && g.composite.p2m > 0 && <span> · </span>}
+                  {g.composite.p2m > 0 && <span>Paper2 {Math.round(g.composite.p2pct * 100)}%</span>}
+                  <span className="text-slate-400"> · P1 60% + P2 20%（化算回 100）</span>
+                </div>
+              )}
+            </div>
+            {g.composite ? (
+              <div className="rounded-2xl bg-indigo-50 border border-indigo-100 px-5 py-3 text-center min-w-[120px]">
+                <div className="text-xs font-bold text-indigo-500">估算等級</div>
+                <div className={`text-4xl font-black mt-1 ${g.composite.grade.color.split(" ").filter(x=>x.startsWith("text-")).join(" ") || "text-indigo-700"}`}>
+                  {g.composite.grade.level}
+                </div>
+                <div className="text-sm font-bold text-slate-600 mt-1">得分率 {(g.composite.pct * 100).toFixed(1)}%</div>
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-slate-50 border px-5 py-3 text-slate-400 text-sm font-bold">尚未入分</div>
+            )}
+          </div>
+
+          <div className="p-5 grid lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-2 rounded-2xl bg-slate-50 border border-slate-100 p-3">
+              <div className="text-sm font-bold text-slate-500 mb-1 text-center">該年各課題能力分佈</div>
+              <div className="h-56">
+                <canvas ref={el => { chartRefs.current[g.year] = el; }} />
+              </div>
+              {!(domainByYear[g.year]?.labels?.length) && (
+                <div className="text-center text-slate-400 text-sm -mt-40">入分後顯示</div>
+              )}
+            </div>
+            <div className="lg:col-span-3 space-y-2">
+              {g.papers.map(p => (
+                <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 border border-slate-100 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-base font-bold text-slate-800 truncate">{p.title}</div>
+                    <div className="text-xs text-slate-400 mono">{p.id} · {p.kind}</div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {p.sc ? (
+                      <div className="text-right">
+                        <span className="text-lg font-black text-slate-800">{Math.round(p.sc.earned)}/{Math.round(p.sc.max)}</span>
+                        <span className={`ml-2 text-base font-black ${p.sc.pct >= 0.6 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {Math.round(p.sc.pct * 100)}%
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-sm font-bold text-slate-400">未入分</span>
+                    )}
+                    <button type="button" onClick={() => openEdit(p.id)}
+                      className="text-sm font-black px-3 py-1.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700">
+                      {p.sc ? "修改" : "輸入"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {/* 同年其他未在 group 的？ papers already from paperList */}
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {/* 無年份標籤的卷 */}
+      {yearFilter === "ALL" && paperList.some(p => !p.year) && (
+        <div className="bg-white rounded-2xl border p-5">
+          <div className="font-bold text-slate-700 mb-3">其他試卷</div>
+          <div className="space-y-2">
+            {paperList.filter(p => !p.year).map(p => {
+              const sc = scoreOfPaper(p.id);
+              return (
+                <div key={p.id} className="flex justify-between gap-3 items-center rounded-xl bg-slate-50 px-4 py-3">
+                  <div className="font-bold">{p.title}</div>
+                  <button type="button" className="text-sm font-bold bg-indigo-600 text-white px-3 py-1.5 rounded-lg" onClick={() => openEdit(p.id)}>
+                    {sc ? `${Math.round(sc.pct*100)}% · 修改` : "輸入"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+function collectTopicStatsFromPapers(items) {
+  // items: [{ map, rec, label }]
+  const topicBag = {};
+  items.forEach(({ map, rec }) => {
+    if (!map?.questions) return;
+    const rawRec = rec || {};
+    // 功課成績多在 rec.scores；考試／小測／PP 多為扁平
+    const body = (rawRec.scores && typeof rawRec.scores === "object")
+      ? { ...rawRec, ...rawRec.scores }
+      : rawRec;
+    map.questions.forEach(q => {
+      const tid = q.topicId || "（無）";
+      const raw = body[q.id];
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      const sc = quizQuestionScore(q, raw);
+      if (sc == null) return;
+      if (!topicBag[tid]) {
+        topicBag[tid] = { tid, label: q.topicDesc || tid, score: 0, max: 0, weakQs: [] };
+      }
+      topicBag[tid].score += sc;
+      topicBag[tid].max += q.max || 1;
+      if (sc < (q.max || 1)) {
+        topicBag[tid].weakQs.push({
+          id: q.id,
+          desc: q.topicDesc || "",
+          score: sc,
+          max: q.max || 1
+        });
+      }
+      if (q.topicDesc) topicBag[tid].label = q.topicDesc;
+    });
+  });
+  return Object.values(topicBag).map(t => ({
+    ...t,
+    pct: t.max > 0 ? Math.round((t.score / t.max) * 100) : null
+  })).sort((a, b) => String(a.tid).localeCompare(String(b.tid), undefined, { numeric: true }));
+}
+
+function AiReviewView({ student, maps, scores, initialSource }) {
+  const cohort = student.cohort || "";
+  const [source, setSource] = useState(initialSource || "hw"); // hw | quiz | exam | pp
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectedTopics, setSelectedTopics] = useState([]);
+  const [lang, setLang] = useState("繁體中文");
+  const [mc, setMc] = useState(10);
+  const [lq, setLq] = useState(0);
+  const [level, setLevel] = useState("中");
+  const [extra, setExtra] = useState({ practice: true, notes: false, ppt: false, explainImg: false });
+
+  useEffect(() => {
+    if (initialSource) setSource(initialSource);
+  }, [initialSource]);
+
+  useEffect(() => {
+    setSelectedIds([]);
+    setSelectedTopics([]);
+  }, [source]);
+
+  const sourceItems = useMemo(() => {
+    const rows = [];
+    if (source === "hw") {
+      Object.entries(maps.homework || {}).forEach(([id, m]) => {
+        if (!homeworkVisibleForStudent(m, id, cohort, scores.homeworks)) return;
+        const sc = scoreOfRec(m, scores.homeworks?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.homeworks?.[id] || {}, sc, kind: "功課" });
+      });
+    } else if (source === "quiz") {
+      Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+        if (!mapVisible(m, cohort)) return;
+        const sc = scoreOfRec(m, scores.quizzes?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.quizzes?.[id] || {}, sc, kind: "小測" });
+      });
+    } else if (source === "exam") {
+      Object.entries(maps.exam || {}).forEach(([id, m]) => {
+        if (!mapVisible(m, cohort)) return;
+        const st = examWeighted(m, scores.exams?.[id], id);
+        const sc = st ? { earned: st.total, max: st.max, pct: st.weighted / 100 } : null;
+        rows.push({ id, title: m.title || id, map: m, rec: scores.exams?.[id] || {}, sc, kind: "考試", weighted: st?.weighted });
+      });
+    } else {
+      Object.entries(maps.pastpaper || {}).forEach(([id, m]) => {
+        const sc = scoreOfRec(m, scores.pastpapers?.[id]);
+        rows.push({ id, title: m.title || id, map: m, rec: scores.pastpapers?.[id] || {}, sc, kind: "Pastpaper" });
+      });
+    }
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
+    return rows;
+  }, [source, maps, scores, cohort]);
+
+  const topicPool = useMemo(() => {
+    const chosen = sourceItems.filter(r => selectedIds.includes(r.id));
+    return collectTopicStatsFromPapers(chosen.map(r => ({ map: r.map, rec: r.rec })));
+  }, [sourceItems, selectedIds]);
+
+  const weakTopics = topicPool.filter(t => t.pct == null || t.pct < 60);
+  const strongTopics = topicPool.filter(t => t.pct != null && t.pct >= 60);
+
+  // 選卷後：弱項預選
+  useEffect(() => {
+    setSelectedTopics(weakTopics.map(t => t.tid));
+  }, [selectedIds.join("|"), source, weakTopics.map(t => t.tid).join("|")]);
+
+  const toggleId = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const toggleTopic = (tid) => setSelectedTopics(prev => prev.includes(tid) ? prev.filter(x => x !== tid) : [...prev, tid]);
+
+  const buildPrompt = () => {
+    const picked = topicPool.filter(t => selectedTopics.includes(t.tid));
+    const studentName = student.name || "同學";
+    const srcLabel = { hw: "功課", quiz: "小測", exam: "考試", pp: "歷屆試題" }[source] || source;
+    const paperLines = sourceItems.filter(r => selectedIds.includes(r.id)).map(r => {
+      const score = r.weighted != null
+        ? `加權 ${r.weighted.toFixed(1)}/100`
+        : (r.sc ? `${Math.round(r.sc.earned)}/${Math.round(r.sc.max)}（${Math.round(r.sc.pct * 100)}%）` : "無分");
+      return `- ${r.title}（${r.id}）：${score}`;
+    }).join("\n");
+
+    const weakLines = picked.length
+      ? picked.map(t => {
+          const qs = (t.weakQs || []).slice(0, 6).map(q =>
+            `    · ${q.id}: ${q.desc || "概念不穩"}（${q.score}/${q.max}）`
+          ).join("\n");
+          return `- [${t.tid}] ${t.label}｜掌握度 ${t.pct != null ? t.pct + "%" : "—"}\n${qs || "    · （綜合薄弱）"}`;
+        }).join("\n")
+      : "- （尚未指定弱項：請按已選範圍出由淺入深鞏固練習）";
+
+    const syllabus = getSyllabusTableText(picked.map(t => t.tid));
+    const outs = [];
+    if (extra.practice) outs.push("互動式練習（Canvas）");
+    if (extra.notes) outs.push("溫習筆記");
+    if (extra.ppt) outs.push("PPT 大綱");
+    if (extra.explainImg) outs.push("解說圖描述");
+
+    return `【身份】你是香港 DSE 化學科老師。
+
+【任務】為學生【${studentName}】（${student.class}-${student.num}）設計【AI 溫習】材料，針對其在「${srcLabel}」中的失分點。
+
+【已選${srcLabel}】
+${paperLines || "（未選）"}
+
+【學生弱項／課題（含不會的題目描述）】
+${weakLines}
+
+【課程大綱參考】
+${syllabus}
+
+【基本設定】
+- 語言：${lang}
+- 難度：${level}
+- 多項選擇題 (MC)：${mc} 題
+- 長題目 (LQ)：${lq} 題
+- 產出：${outs.join("、") || "練習"}
+- ★ 若包含練習：必須用 AI **Canvas（畫布）** 做成【互動式小測驗】——逐題顯示、學生作答後再給對錯與簡短解說；不要一次公開全部答案。
+
+【要求】
+1. 緊貼上述 topicId 與「不會的題目描述」，由淺入深。
+2. MC 附 4 選項；答錯指出迷思。
+3. 每題標明 topicId。
+4. 開頭用一句話鼓勵 ${studentName}。
+${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。\\n" : ""}${extra.ppt ? "5. 另附 PPT 大綱 8–12 頁（每頁標題+要點）。\\n" : ""}${extra.explainImg ? "5. 另附解說圖描述（每弱項一段，方便 AI 繪圖）。\\n" : ""}`;
+  };
+
+  const copyAndOpenGemini = async () => {
+    const prompt = buildPrompt();
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch (e) {
+      alert("複製失敗，請手動全選 Prompt");
+      return;
+    }
+    window.open("https://gemini.google.com/app", "_blank", "noopener,noreferrer");
+    alert("已複製 Prompt，並開啟 Gemini。請在 Gemini 貼上（Ctrl/Cmd+V）。");
+  };
+
+  const sources = [
+    { id: "hw", label: "功課" },
+    { id: "quiz", label: "小測" },
+    { id: "exam", label: "考試" },
+    { id: "pp", label: "Pastpaper" }
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800">AI 溫習</h2>
+        <p className="text-base text-slate-500 mt-1">選範圍 → 勾弱項 → 複製 Prompt → 自動開啟 Gemini</p>
+      </div>
+
+      {/* Step 1 source */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-3">
+        <div className="text-base font-black text-slate-700">① 選擇類型</div>
+        <div className="flex flex-wrap gap-2">
+          {sources.map(s => (
+            <button key={s.id} type="button" onClick={() => setSource(s.id)}
+              className={`px-5 py-2.5 rounded-2xl text-base font-black border-2 ${source === s.id ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-600 border-slate-200"}`}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Step 2 items */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-3">
+        <div className="flex flex-wrap justify-between gap-2 items-center">
+          <div className="text-base font-black text-slate-700">② 選擇項目（可多選）</div>
+          <div className="flex gap-2">
+            <button type="button" className="text-sm font-bold text-indigo-600" onClick={() => setSelectedIds(sourceItems.map(r => r.id))}>全選</button>
+            <button type="button" className="text-sm font-bold text-slate-500" onClick={() => setSelectedIds([])}>清空</button>
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-2 max-h-64 overflow-auto">
+          {sourceItems.map(r => {
+            const on = selectedIds.includes(r.id);
+            const pct = r.weighted != null ? r.weighted : (r.sc ? r.sc.pct * 100 : null);
+            const scoreTxt = r.weighted != null
+              ? `${r.weighted.toFixed(1)}/100`
+              : (r.sc ? `${Math.round(r.sc.earned)}/${Math.round(r.sc.max)}` : "無分");
+            const pctCls = pct == null ? "text-slate-400" : pct >= 70 ? "text-emerald-600" : pct >= 50 ? "text-amber-600" : "text-rose-600";
+            return (
+              <label key={r.id} className={`flex items-center gap-3 rounded-2xl border-2 px-3 py-3 cursor-pointer ${on ? "border-indigo-500 bg-indigo-50" : "border-slate-100 bg-slate-50"}`}>
+                <input type="checkbox" checked={on} onChange={() => toggleId(r.id)} className="w-5 h-5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-bold text-slate-800 truncate text-base">{r.title}</div>
+                  <div className="text-sm text-slate-500">{scoreTxt}</div>
+                </div>
+                <div className={`text-2xl font-black tabular-nums ${pctCls}`}>
+                  {pct != null ? Math.round(pct) + "%" : "—"}
+                </div>
+              </label>
+            );
+          })}
+          {!sourceItems.length && <div className="text-slate-400 text-base col-span-2 py-6 text-center">此類型暫無項目</div>}
+        </div>
+      </div>
+
+      {/* Step 3 topics */}
+      <div className="bg-white rounded-3xl border p-5 shadow-sm space-y-4">
+        <div className="text-base font-black text-slate-700">③ 課題掌握度（&lt;60% 已預選）</div>
+        {!selectedIds.length && <p className="text-slate-400">請先選擇至少一份項目</p>}
+        {!!selectedIds.length && !topicPool.length && (
+          <p className="text-slate-400">所選項目未有題目 topic 或未入分，仍可直接生成通用溫習 Prompt</p>
+        )}
+        {!!weakTopics.length && (
+          <div>
+            <div className="text-sm font-black text-rose-700 mb-2">弱項 &lt; 60%（預選）· {weakTopics.length}</div>
+            <div className="space-y-2 max-h-48 overflow-auto">
+              {weakTopics.map(t => (
+                <label key={t.tid} className={`flex gap-3 items-start rounded-xl border px-3 py-2 cursor-pointer ${selectedTopics.includes(t.tid) ? "border-rose-400 bg-rose-50" : "border-slate-100"}`}>
+                  <input type="checkbox" className="mt-1" checked={selectedTopics.includes(t.tid)} onChange={() => toggleTopic(t.tid)} />
+                  <div>
+                    <div className="font-bold text-base"><span className="mono text-rose-700">{t.tid}</span> {t.label} · {t.pct != null ? t.pct + "%" : "—"}</div>
+                    {(t.weakQs || []).slice(0, 3).map(q => (
+                      <div key={q.id} className="text-sm text-slate-600">· {q.id} {q.desc}（{q.score}/{q.max}）</div>
+                    ))}
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        {!!strongTopics.length && (
+          <div>
+            <div className="text-sm font-black text-emerald-700 mb-2">≥ 60%（可自選溫習）· {strongTopics.length}</div>
+            <div className="space-y-2 max-h-40 overflow-auto">
+              {strongTopics.map(t => (
+                <label key={t.tid} className={`flex gap-3 items-start rounded-xl border px-3 py-2 cursor-pointer ${selectedTopics.includes(t.tid) ? "border-indigo-400 bg-indigo-50" : "border-slate-100"}`}>
+                  <input type="checkbox" className="mt-1" checked={selectedTopics.includes(t.tid)} onChange={() => toggleTopic(t.tid)} />
+                  <div className="font-bold text-base"><span className="mono text-emerald-700">{t.tid}</span> {t.label} · {t.pct}%</div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Step 4 prompt */}
+      <div className="bg-gradient-to-br from-violet-50 to-indigo-50 rounded-3xl border-2 border-violet-200 p-5 space-y-4">
+        <div className="text-base font-black text-violet-900">④ 生成設定與 Prompt</div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <label className="text-sm font-bold">語言
+            <select className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={lang} onChange={e => setLang(e.target.value)}>
+              <option value="繁體中文">繁體中文</option>
+              <option value="English">English</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold">難度
+            <select className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={level} onChange={e => setLevel(e.target.value)}>
+              <option value="淺">淺</option><option value="中">中</option><option value="深">深</option>
+            </select>
+          </label>
+          <label className="text-sm font-bold">MC
+            <input type="number" className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={mc} onChange={e => setMc(parseInt(e.target.value) || 0)} />
+          </label>
+          <label className="text-sm font-bold">LQ
+            <input type="number" className="mt-1 w-full border-2 rounded-xl px-3 py-2 text-base font-bold" value={lq} onChange={e => setLq(parseInt(e.target.value) || 0)} />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {[["practice", "練習（Canvas）"], ["notes", "筆記"], ["ppt", "PPT"], ["explainImg", "解說圖"]].map(([k, lab]) => (
+            <label key={k} className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer bg-white ${extra[k] ? "border-violet-500" : "border-slate-200"}`}>
+              <input type="checkbox" checked={!!extra[k]} onChange={e => setExtra(x => ({ ...x, [k]: e.target.checked }))} />
+              {lab}
+            </label>
+          ))}
+        </div>
+        <button type="button" onClick={copyAndOpenGemini}
+          className="w-full md:w-auto bg-violet-600 hover:bg-violet-700 text-white font-black text-lg px-8 py-3.5 rounded-2xl shadow">
+          複製 Prompt 並開啟 Gemini
+        </button>
+        <p className="text-sm text-violet-800">會複製含弱項題目描述、topicId、課程大綱的 Prompt，並開新分頁到 Gemini。</p>
+      </div>
+    </div>
+  );
+}
+
+
+
+function computePeerComponent(maps, scoresTree, cohort) {
+  // returns { hw, quiz, exam, pp, overall }
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const hwPcts = [], quizPcts = [], examWs = [], ppPcts = [];
+  Object.entries(maps.homework || {}).forEach(([id, m]) => {
+    if (!mapVisible(m, cohort) && !(m.cohort === cohort)) return;
+    // 排名用：群組相符或無群組
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const sc = scoreOfRec(m, scoresTree.homeworks?.[id]);
+    if (sc) hwPcts.push(sc.pct);
+  });
+  Object.entries(maps.quiz || {}).forEach(([id, m]) => {
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const sc = scoreOfRec(m, scoresTree.quizzes?.[id]);
+    if (sc) quizPcts.push(sc.pct);
+  });
+  Object.entries(maps.exam || {}).forEach(([id, m]) => {
+    if (m.cohort && m.cohort !== "" && m.cohort !== "所有學生" && m.cohort !== cohort) return;
+    const st = examWeighted(m, scoresTree.exams?.[id], id);
+    if (st) examWs.push(st.weighted / 100);
+  });
+  Object.entries(maps.pastpaper || {}).forEach(([id, m]) => {
+    const sc = scoreOfRec(m, scoresTree.pastpapers?.[id]);
+    if (sc) ppPcts.push(sc.pct);
+  });
+  const hw = avg(hwPcts), quiz = avg(quizPcts), exam = avg(examWs), pp = avg(ppPcts);
+  const parts = [];
+  if (hw != null) parts.push({ w: 20, v: hw });
+  if (quiz != null) parts.push({ w: 30, v: quiz });
+  if (exam != null) parts.push({ w: 50, v: exam });
+  const sumW = parts.reduce((a, p) => a + p.w, 0);
+  const overall = sumW ? parts.reduce((a, p) => a + p.v * (p.w / sumW), 0) : null;
+  return { hw, quiz, exam, pp, overall };
+}
+
+function RankBoardView({ student, maps, cohortPeers, peerScores }) {
+  const [mode, setMode] = useState("overall"); // overall | hw | quiz | exam | pp
+
+  const rows = useMemo(() => {
+    const key = mode === "overall" ? "overall" : mode === "hw" ? "hw" : mode === "quiz" ? "quiz" : mode === "exam" ? "exam" : "pp";
+    const list = (cohortPeers || []).map(s => {
+      const ps = peerScores?.[s.id];
+      const val = ps ? ps[key] : null;
+      return { id: s.id, name: s.name, class: s.class, num: s.num, val, detail: ps };
+    }).filter(r => r.val != null);
+    list.sort((a, b) => b.val - a.val);
+    const n = list.length;
+    // 隱藏最後 25%（含自己）
+    const cutoff = Math.ceil(n * 0.75);
+    const visible = list.slice(0, Math.max(cutoff, 0));
+    return visible.map((r, i) => ({ ...r, rank: i + 1, total: n }));
+  }, [cohortPeers, peerScores, mode]);
+
+  const modes = [
+    { id: "overall", label: "綜合排名" },
+    { id: "hw", label: "功課" },
+    { id: "quiz", label: "小測" },
+    { id: "exam", label: "統考" },
+    { id: "pp", label: "Pastpaper" }
+  ];
+
+  const medal = (rank) => {
+    if (rank === 1) return "🥇";
+    if (rank === 2) return "🥈";
+    if (rank === 3) return "🥉";
+    return String(rank);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">🏆 班級戰力排名</h2>
+        <p className="text-base text-slate-500 mt-1">
+          綜合 = 功課 20% + 小測 30% + 統考 50%（缺項會在現有類別間重算）。Pastpaper 獨立。最尾約 25% 不顯示。
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {modes.map(m => (
+          <button key={m.id} type="button" onClick={() => setMode(m.id)}
+            className={`px-5 py-2.5 rounded-full text-base font-black border-2 ${mode === m.id ? "bg-amber-400 text-amber-950 border-amber-500" : "bg-white text-slate-600 border-slate-200"}`}>
+            {m.label}
+          </button>
+        ))}
+      </div>
+      <div className="bg-white rounded-3xl border shadow-sm overflow-hidden">
+        {!rows.length && (
+          <div className="p-12 text-center text-slate-400 text-lg">暫無足夠成績可排名</div>
+        )}
+        {rows.map(r => {
+          const isYou = r.id === student.id;
+          return (
+            <div key={r.id} className={`flex flex-wrap items-center gap-3 px-5 py-4 border-b border-slate-100 ${isYou ? "bg-amber-50" : ""}`}>
+              <div className={`w-10 text-center text-xl font-black ${r.rank <= 3 ? "text-amber-500" : "text-slate-400"}`}>
+                {medal(r.rank)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-lg font-black text-slate-800 flex items-center gap-2">
+                  {isYou && <span className="text-xs font-black bg-amber-400 text-amber-950 px-2 py-0.5 rounded-md">YOU</span>}
+                  {r.name}
+                </div>
+                {mode === "overall" && r.detail && (
+                  <div className="text-sm text-slate-500 mt-0.5">
+                    {r.detail.hw != null && <span className="mr-2">功課 {Math.round(r.detail.hw * 100)}%</span>}
+                    {r.detail.quiz != null && <span className="mr-2">小測 {Math.round(r.detail.quiz * 100)}%</span>}
+                    {r.detail.exam != null && <span className="mr-2">統考 {Math.round(r.detail.exam * 100)}%</span>}
+                  </div>
+                )}
+              </div>
+              <div className="text-2xl font-black text-amber-600 tabular-nums">
+                {(r.val * 100).toFixed(1)}%
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+function StudentShell({ student, onLogout }) {
+  const [tab, setTab] = useState("home");
+  const [aiSource, setAiSource] = useState("hw");
+  const [loading, setLoading] = useState(true);
+  const [maps, setMaps] = useState({ homework: {}, quiz: {}, exam: {}, pastpaper: {} });
+  const [scores, setScores] = useState({ homeworks: {}, quizzes: {}, exams: {}, pastpapers: {} });
+  const [makeup, setMakeup] = useState({ quiz: {}, exam: {} });
+  const [taughtQuizzes, setTaughtQuizzes] = useState(null); // Set of quiz ids taught in cohort
+  const [cohortPeers, setCohortPeers] = useState([]);
+  const [peerScores, setPeerScores] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        await loadSyllabusTopics();
+        const [hw, quiz, exam, pp, qMk, eMk] = await Promise.all([
+          loadCollectionMaps("homeworkMaps"),
+          loadCollectionMaps("quizMaps"),
+          loadCollectionMaps("examMaps"),
+          loadCollectionMaps("pastpaperMaps"),
+          loadMakeupCollection("quizMakeup"),
+          loadMakeupCollection("examMakeup")
+        ]);
+        const [hws, qzs, exs, pps] = await Promise.all([
+          loadSubScores(student.id, "homeworks"),
+          loadSubScores(student.id, "quizzes"),
+          loadSubScores(student.id, "exams"),
+          loadSubScores(student.id, "pastpapers")
+        ]);
+        if (cancelled) return;
+        setMaps({ homework: hw, quiz, exam, pastpaper: pp });
+        setScores({ homeworks: hws, quizzes: qzs, exams: exs, pastpapers: pps });
+        setMakeup({ quiz: qMk, exam: eMk });
+        // 全班已測小測（自己+同群組）
+        try {
+          const allStu = await loadAllStudents();
+          const peers = allStu.filter(s => s.cohort && s.cohort === student.cohort).map(s => s.id);
+          const ids = peers.length ? peers : [student.id];
+          const qids = Object.keys(quiz || {}).filter(id => {
+            const m = quiz[id];
+            if (!m) return false;
+            if (!m.cohort || m.cohort === "" || m.cohort === "所有學生") return true;
+            return m.cohort === student.cohort;
+          });
+          const taught = await loadTaughtQuizIds(ids, qids);
+          if (!cancelled) setTaughtQuizzes(taught);
+        } catch (e) {
+          console.warn(e);
+          if (!cancelled) setTaughtQuizzes(new Set());
+        }
+
+        // cohort peers for ranking (lightweight overall)
+        const all = await loadAllStudents();
+        const peers = all.filter(s => s.cohort && s.cohort === student.cohort);
+        setCohortPeers(peers);
+        // 只用 scoreSummary（約 N 次讀），不再拉全組成績樹
+        const peerOut = await loadScoreSummaries(peers.map(s => s.id));
+        if (!cancelled) setPeerScores(peerOut);
+
+      } catch (e) { alert(e.message); }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [student.id]);
+
+  const tabs = [
+    { id: "home", label: "總覽" },
+    { id: "school", label: "校內進度" },
+    { id: "pp", label: "歷屆試題" },
+    { id: "ai", label: "AI 溫習" },
+    { id: "rank", label: "英雄榜" }
+  ];
+
+  return (
+    <div className="min-h-screen bg-[#f1f5f9]">
+      <header className="bg-[#1e3a8a] text-white shadow-md">
+        <div className="max-w-5xl mx-auto px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center font-black">
+              {(student.name || "?").charAt(0)}
+            </div>
+            <div>
+              <div className="font-black leading-tight">{student.name}</div>
+              <div className="text-[11px] text-blue-200">{student.cohort || ""} · {student.class}-{student.num}</div>
+            </div>
+          </div>
+          <button className="text-sm font-bold text-blue-100 hover:text-white border border-white/20 rounded-lg px-3 py-1.5" onClick={onLogout}>登出</button>
+        </div>
+        <div className="max-w-5xl mx-auto px-4 flex gap-1 overflow-x-auto">
+          {tabs.map(tb => (
+            <button key={tb.id} onClick={() => setTab(tb.id)}
+              className={`px-4 py-2.5 text-sm font-bold rounded-t-lg whitespace-nowrap border-b-2 ${tab === tb.id ? "bg-white text-indigo-800 border-white" : "text-blue-100 border-transparent hover:bg-white/10"}`}>
+              {tb.label}
+            </button>
+          ))}
+        </div>
+      </header>
+      <main className="max-w-5xl mx-auto px-4 py-6 bg-[#f8fafc] min-h-[70vh]">
+        {loading && <div className="text-center text-slate-400 py-16">載入你的數據…</div>}
+        {!loading && tab === "home" && (
+          <HomeDashboard student={student} maps={maps} scores={scores} makeup={makeup} taughtQuizzes={taughtQuizzes} cohortPeers={cohortPeers} peerScores={peerScores} />
+        )}
+        {!loading && tab === "school" && (
+          <SchoolProgressView student={student} maps={maps} scores={scores} makeup={makeup} taughtQuizzes={taughtQuizzes}
+            onGoAi={(src) => { setAiSource(src || "hw"); setTab("ai"); }} />
+        )}
+        {!loading && tab === "pp" && (
+          <PastpaperStudentView student={student} maps={maps} scores={scores} setScores={setScores}
+            onGoAi={(src) => { setAiSource(src || "pp"); setTab("ai"); }} />
+        )}
+        {!loading && tab === "ai" && (
+          <AiReviewView student={student} maps={maps} scores={scores} initialSource={aiSource} />
+        )}
+        {!loading && tab === "rank" && (
+          <RankBoardView student={student} maps={maps} cohortPeers={cohortPeers} peerScores={peerScores} />
+        )}
+        {!loading && tab !== "home" && tab !== "school" && tab !== "pp" && tab !== "ai" && tab !== "rank" && (
+          <div className="bg-white rounded-3xl border p-12 text-center text-slate-400">
+            <div className="text-lg font-bold text-slate-600 mb-2">{tabs.find(x => x.id === tab)?.label}</div>
+            功能開發中
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function App() {
+  const [student, setStudent] = useState(null);
+  const [booting, setBooting] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const sid = sessionStorage.getItem(SS_SID);
+      if (sid) {
+        try {
+          const s = await loadStudent(sid);
+          if (s && hasPin(s)) setStudent(s);
+          else sessionStorage.removeItem(SS_SID);
+        } catch (e) {}
+      }
+      setBooting(false);
+    })();
+  }, []);
+
+  if (booting) return <div className="min-h-screen flex items-center justify-center text-slate-400">啟動中…</div>;
+  if (!student) return <LoginView onLogin={setStudent} />;
+  return (
+    <StudentShell
+      student={student}
+      onLogout={() => {
+        sessionStorage.removeItem(SS_SID);
+        setStudent(null);
+      }}
+    />
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
