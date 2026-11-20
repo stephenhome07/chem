@@ -536,10 +536,11 @@ async function loadExamMakeup(examId) {
 }
 
 async function saveExamMakeup(examId, studentsMap) {
+  // 不用 merge 深層合併 students，整份覆蓋，確保取消勾選真的寫入
   await db.collection("examMakeup").doc(String(examId)).set({
-    students: studentsMap,
+    students: studentsMap || {},
     updatedAt: new Date().toISOString()
-  }, { merge: true });
+  });
 }
 
 async function loadPastpaperMaps() {
@@ -773,12 +774,33 @@ async function deleteQuizScore(studentId, quizId) {
   await db.collection("scores").doc(studentId).collection("quizzes").doc(String(quizId)).delete();
 }
 
+/** MC 正解列表：支援 "B,D" / "B/D" / "B 或 D" / "BD" */
+function parseMcAnswerKey(ans) {
+  if (ans == null || String(ans).trim() === "") return [];
+  let s = String(ans).toUpperCase().trim();
+  s = s.replace(/或/g, ",").replace(/[\/|、；;]/g, ",");
+  let parts = s.split(",").map(x => x.trim()).filter(Boolean);
+  if (parts.length === 1 && /^[A-D]{2,4}$/.test(parts[0])) parts = parts[0].split("");
+  const out = [];
+  parts.forEach(p => {
+    const m = p.match(/[A-D]/);
+    if (m && !out.includes(m[0])) out.push(m[0]);
+  });
+  return out;
+}
+function normalizeMcAnswerKey(ans) {
+  return parseMcAnswerKey(ans).join(",");
+}
 function quizQuestionScore(q, raw) {
   if (raw === undefined || raw === null || String(raw).trim() === "") return null;
   if (q.type === "MC") {
     if (!q.ans) return 0;
-    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
-    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+    const corrects = parseMcAnswerKey(q.ans);
+    if (!corrects.length) return 0;
+    const student = String(raw).trim().toUpperCase().replace(/[^A-D]/g, "");
+    if (student.length === 1) return corrects.includes(student) ? (q.max || 1) : 0;
+    if (student.length > 1) return student.split("").some(ch => corrects.includes(ch)) ? (q.max || 1) : 0;
+    return 0;
   }
   const n = parseFloat(raw);
   return isNaN(n) ? 0 : n;
@@ -4839,6 +4861,10 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   const [mkLq, setMkLq] = useState(0);
   const [mkLevel, setMkLevel] = useState("淺");
   const [promptTopicIds, setPromptTopicIds] = useState([]);
+  const makeupRef = useRef({});
+  const saveSeqRef = useRef(0);
+
+  useEffect(() => { makeupRef.current = makeup; }, [makeup]);
 
   useEffect(() => {
     if (examIds.length && !examIds.includes(selectedExam)) setSelectedExam(examIds[0] || "");
@@ -4866,8 +4892,45 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
           });
           return next;
         });
-        setMakeup(mk || {});
+        // 正規化 topics：保留 done / 手動加入
+        const normalized = {};
+        Object.keys(mk || {}).forEach(sid => {
+          const entry = mk[sid] || {};
+          const topics = {};
+          Object.entries(entry.topics || {}).forEach(([tid, tp]) => {
+            const k = String(tid || "").trim();
+            if (!k) return;
+            const pct = tp && tp.pct != null ? Number(tp.pct) : null;
+            const isStrong = pct != null && pct >= 60;
+            // ≥60% 只有明確 manual 才保留；舊資料一次全選的會自動清掉
+            if (isStrong && !(tp && tp.manual)) return;
+            topics[k] = {
+              done: !!(tp && tp.done),
+              label: (tp && tp.label) || k,
+              pct,
+              qs: (tp && tp.qs) || [],
+              manual: !!(tp && tp.manual) || isStrong
+            };
+          });
+          const ids = Object.keys(topics);
+          const allDone = ids.length > 0 && ids.every(id => topics[id].done);
+          normalized[sid] = {
+            ...entry,
+            topics,
+            status: allDone ? "DONE" : (entry.status || "PENDING")
+          };
+        });
+        makeupRef.current = normalized;
+        setMakeup(normalized);
         setFocus("");
+        // 若清掉了舊的 ≥60% 無 manual 資料，寫回雲端，避免下次又載入舊勾選
+        try {
+          const rawCount = Object.keys(mk || {}).reduce((n, sid) => n + Object.keys((mk[sid] || {}).topics || {}).length, 0);
+          const newCount = Object.keys(normalized).reduce((n, sid) => n + Object.keys((normalized[sid] || {}).topics || {}).length, 0);
+          if (newCount < rawCount) {
+            await saveExamMakeup(selectedExam, normalized);
+          }
+        } catch (e) { console.warn("cleanup makeup save", e); }
       } catch (e) { console.warn(e); }
       if (!cancelled) setLoading(false);
     })();
@@ -4908,12 +4971,30 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   };
 
   const persist = async (nextMap) => {
+    // 同步更新 ref，避免連點／onBlur 用到舊 makeup 蓋掉勾選與「標完成」
+    makeupRef.current = nextMap;
+    setMakeup(nextMap);
+    const seq = ++saveSeqRef.current;
     setSaving(true);
     try {
       await saveExamMakeup(selectedExam, nextMap);
-      setMakeup(nextMap);
     } catch (e) { alert(e.message); }
-    setSaving(false);
+    if (seq === saveSeqRef.current) setSaving(false);
+  };
+
+  /** 以最新 makeupRef 為準 patch 單一學生，避免 stale state */
+  const patchStudent = (sid, patchOrFn) => {
+    const prev = makeupRef.current || {};
+    const cur = prev[sid] || {};
+    const patch = typeof patchOrFn === "function" ? patchOrFn(cur) : patchOrFn;
+    let entry = { ...cur, ...patch, updatedAt: new Date().toISOString() };
+    if (patch.topics) {
+      const ids = Object.keys(patch.topics);
+      entry.status = ids.length > 0 && ids.every(id => patch.topics[id]?.done) ? "DONE" : "PENDING";
+    }
+    const next = { ...prev, [sid]: entry };
+    persist(next);
+    return next;
   };
 
   const buildWeakTopicsForStudent = (sid) => {
@@ -4935,7 +5016,8 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
     Object.entries(topicBag).forEach(([tid, v]) => {
       const pct = v.max > 0 ? (v.score / v.max) * 100 : 0;
       if (pct < 60) {
-        topics[tid] = { done: false, label: v.desc || tid, pct: Math.round(pct), qs: v.qs };
+        const k = String(tid || "").trim();
+        topics[k] = { done: false, label: v.desc || k, pct: Math.round(pct), qs: v.qs };
       }
     });
     return topics;
@@ -4965,7 +5047,7 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
   };
 
   const addStudent = (sid, category) => {
-    if (!sid || makeup[sid]) return;
+    if (!sid || (makeupRef.current || {})[sid]) return;
     const st = calcStudent(sid);
     const entry = {
       category: category || (!st ? "ABSENT" : (st.weighted < 50 ? "FAIL" : "LOW")),
@@ -4975,13 +5057,12 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
       status: "PENDING",
       updatedAt: new Date().toISOString()
     };
-    const next = { ...makeup, [sid]: entry };
-    persist(next);
+    persist({ ...(makeupRef.current || {}), [sid]: entry });
     setFocus(sid);
   };
 
   const addSuggested = () => {
-    const next = { ...makeup };
+    const next = { ...(makeupRef.current || {}) };
     activeStudents.forEach(s => {
       const st = calcStudent(s.id);
       if (!st || st.weighted < 50) {
@@ -5002,7 +5083,7 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
 
   const removeStudent = (sid) => {
     if (!confirm("從補考名單移除？進度會刪除。")) return;
-    const next = { ...makeup };
+    const next = { ...(makeupRef.current || {}) };
     delete next[sid];
     persist(next);
     if (focus === sid) setFocus("");
@@ -5176,7 +5257,22 @@ ${syllabus}
                     {focusComplete && <span className="ml-2 text-emerald-600 font-bold">✓ 全部課題已完成</span>}
                   </div>
                 </div>
-                <button className="text-rose-600 text-xs font-bold" onClick={() => removeStudent(focus)}>移出名單</button>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="text-amber-700 text-xs font-bold border border-amber-300 bg-amber-50 px-2 py-1 rounded-lg"
+                    onClick={() => {
+                      if (!confirm("清除此生所有 ≥60% 課題（保留 <60% 弱項）？")) return;
+                      patchStudent(focus, (cur) => {
+                        const nextTopics = {};
+                        Object.entries(cur.topics || {}).forEach(([tid, tp]) => {
+                          const pct = tp && tp.pct != null ? Number(tp.pct) : null;
+                          if (pct != null && pct >= 60) return;
+                          nextTopics[tid] = tp;
+                        });
+                        return { topics: nextTopics };
+                      });
+                    }}>清除 ≥60% 勾選</button>
+                  <button className="text-rose-600 text-xs font-bold" onClick={() => removeStudent(focus)}>移出名單</button>
+                </div>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-2">
@@ -5184,79 +5280,101 @@ ${syllabus}
                   <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
                     value={focusM.sessionNote || ""}
                     onChange={e => {
-                      const next = { ...makeup, [focus]: { ...focusM, sessionNote: e.target.value, updatedAt: new Date().toISOString() } };
+                      const val = e.target.value;
+                      const prev = makeupRef.current || {};
+                      const cur = prev[focus] || focusM;
+                      const next = { ...prev, [focus]: { ...cur, sessionNote: val, updatedAt: new Date().toISOString() } };
+                      makeupRef.current = next;
                       setMakeup(next);
                     }}
-                    onBlur={() => persist(makeup)}
+                    onBlur={e => patchStudent(focus, { sessionNote: e.target.value })}
                     placeholder="今日約 Lunch；上次做到 2.3.3" />
                 </label>
                 <label className="text-xs font-bold">其他備註
                   <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
                     value={focusM.remark || ""}
                     onChange={e => {
-                      const next = { ...makeup, [focus]: { ...focusM, remark: e.target.value } };
+                      const val = e.target.value;
+                      const prev = makeupRef.current || {};
+                      const cur = prev[focus] || focusM;
+                      const next = { ...prev, [focus]: { ...cur, remark: val, updatedAt: new Date().toISOString() } };
+                      makeupRef.current = next;
                       setMakeup(next);
                     }}
-                    onBlur={() => persist(makeup)} />
+                    onBlur={e => patchStudent(focus, { remark: e.target.value })} />
                 </label>
               </div>
 
               <div>
                 <div className="font-bold text-sm text-slate-700 mb-1">本卷學習點（納入補底名單）</div>
-                <p className="text-[11px] text-slate-500 mb-2">&lt;60% 預設已勾；≥60% 可自行勾選加入。右側剔「今日已完成」。</p>
+                <p className="text-[11px] text-slate-500 mb-2">&lt;60% 預設納入；<b className="text-emerald-700">≥60% 預設不勾</b>，只在你手動勾選後才會保留。右側剔「今日已完成」。</p>
                 {(() => {
                   const pool = examTopicPoolForStudent(focus);
                   const weak = pool.filter(x => x.weak);
                   const strong = pool.filter(x => !x.weak);
-                  const toggleInclude = (item) => {
-                    const nextTopics = { ...focusTopics };
-                    if (nextTopics[item.tid]) {
-                      delete nextTopics[item.tid];
-                    } else {
-                      nextTopics[item.tid] = {
-                        done: false,
-                        label: item.label,
-                        pct: item.pct,
-                        qs: item.qs
-                      };
-                    }
-                    const ids = Object.keys(nextTopics);
-                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                    persist({
-                      ...makeup,
-                      [focus]: {
-                        ...focusM,
-                        topics: nextTopics,
-                        status: allDone ? "DONE" : "PENDING",
-                        updatedAt: new Date().toISOString()
+                  const topicKey = (tid) => String(tid || "").trim();
+                  const hasTopic = (topics, tid) => {
+                    const k = topicKey(tid);
+                    if (!topics) return false;
+                    if (topics[k]) return true;
+                    return Object.keys(topics).some(x => topicKey(x) === k);
+                  };
+                  const purgeTopic = (topics, tid) => {
+                    const k = topicKey(tid);
+                    const next = { ...topics };
+                    Object.keys(next).forEach(x => { if (topicKey(x) === k) delete next[x]; });
+                    return next;
+                  };
+                  const toggleInclude = (item, wantOn) => {
+                    const tid = topicKey(item.tid);
+                    patchStudent(focus, (cur) => {
+                      let nextTopics = { ...(cur.topics || {}) };
+                      const currentlyOn = hasTopic(nextTopics, tid);
+                      // 以 checkbox 目標狀態為準，避免「取消」時因 key 不一致反而再加入
+                      if (wantOn === false || (wantOn == null && currentlyOn)) {
+                        nextTopics = purgeTopic(nextTopics, tid);
+                      } else if (wantOn === true || (wantOn == null && !currentlyOn)) {
+                        nextTopics = purgeTopic(nextTopics, tid);
+                        const pct = item.pct != null ? Number(item.pct) : null;
+                        nextTopics[tid] = {
+                          done: false,
+                          label: item.label,
+                          pct,
+                          qs: item.qs,
+                          // ≥60% 必須標 manual，否則下次載入不會勾
+                          manual: pct == null ? false : pct >= 60
+                        };
                       }
+                      return { topics: nextTopics };
                     });
                   };
                   const markDone = (tid) => {
-                    if (!focusTopics[tid]) return;
-                    const nextTopics = {
-                      ...focusTopics,
-                      [tid]: { ...focusTopics[tid], done: !focusTopics[tid].done }
-                    };
-                    const ids = Object.keys(nextTopics);
-                    const allDone = ids.length > 0 && ids.every(id => nextTopics[id].done);
-                    persist({
-                      ...makeup,
-                      [focus]: {
-                        ...focusM,
-                        topics: nextTopics,
-                        status: allDone ? "DONE" : "PENDING",
-                        updatedAt: new Date().toISOString()
-                      }
+                    const k = topicKey(tid);
+                    patchStudent(focus, (cur) => {
+                      const topics = { ...(cur.topics || {}) };
+                      // 找到實際 key
+                      let real = topics[k] ? k : Object.keys(topics).find(x => topicKey(x) === k);
+                      if (!real || !topics[real]) return {};
+                      return {
+                        topics: {
+                          ...topics,
+                          [real]: { ...topics[real], done: !topics[real].done }
+                        }
+                      };
                     });
                   };
                   const row = (item, zone) => {
-                    const included = !!focusTopics[item.tid];
-                    const done = included && focusTopics[item.tid]?.done;
+                    const included = hasTopic(focusTopics, item.tid);
+                    const done = included && (() => {
+                      const k = topicKey(item.tid);
+                      const tp = focusTopics[k] || Object.entries(focusTopics).find(([x]) => topicKey(x) === k)?.[1];
+                      return !!(tp && tp.done);
+                    })();
                     return (
-                      <div key={item.tid} className={`flex items-center gap-2 border rounded-xl p-2 ${done?"bg-emerald-50 border-emerald-200":included?"bg-white border-purple-200":"bg-slate-50 border-slate-100"}`}>
+                      <div key={topicKey(item.tid)} className={`flex items-center gap-2 border rounded-xl p-2 ${done?"bg-emerald-50 border-emerald-200":included?"bg-white border-purple-200":"bg-slate-50 border-slate-100"}`}>
                         <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
-                          <input type="checkbox" checked={included} onChange={() => toggleInclude(item)} />
+                          <input type="checkbox" checked={included}
+                            onChange={e => toggleInclude(item, e.target.checked)} />
                           <div className="min-w-0">
                             <div className="text-sm font-bold">
                               <span className="mono text-purple-700">{item.tid}</span>{" "}
@@ -5623,7 +5741,7 @@ function ExamSettingsView({ students, examMaps, setExamMaps, currentCohort }) {
       level: q.level,
       topicId: q.topicId,
       topicDesc: q.topicDesc,
-      ans: q.ans || ""
+      ans: q.type === "MC" ? normalizeMcAnswerKey(q.ans || "") : (q.ans || "")
     }));
     let cohortVal = assignCohort;
     if (cohortVal === "所有學生") cohortVal = "";
@@ -5696,8 +5814,9 @@ ${syllabus}
 1. 題號：MC1、MC2…／LQ1a、LQ1bi…
 2. 題型：MC 或 LQ；難度：淺／中／深
 3. topicId 必須用上方大綱編號；topicDesc 20–30 字
-4. MC 答案 A/B/C/D；LQ 答案留空
-5. 只輸出資料行（可含表頭），不要 Markdown`;
+4. MC 答案：單一如 A；多個正解用 B,D 或 B/D 或 BD（學生選其中任一個皆得分）
+5. LQ 答案留空
+6. 只輸出資料行（可含表頭），不要 Markdown`;
   };
 
   return (
@@ -5747,10 +5866,12 @@ ${syllabus}
             </label>
             <div className="text-sm text-slate-500 flex items-end pb-2">新建建議選「{selectedCohort || "—"}」</div>
           </div>
-          <label className="text-sm font-bold text-slate-600 block">題目（Tab：題號 題型 滿分 難度 topicId 描述 [答案]）
+                    <label className="text-sm font-bold text-slate-600 block">題目（Tab：題號 題型 滿分 難度 topicId 描述 [答案]）
+            <span className="block text-xs font-normal text-violet-700 mt-0.5 mb-1">MC 可多個正解：例如 <b>B,D</b> 或 <b>B/D</b> 或 <b>BD</b>（學生選 B 或 D 皆得滿分）</span>
             <textarea className="mt-1 w-full border-2 rounded-xl p-3 text-sm mono h-52" value={pasteData} onChange={e=>setPasteData(e.target.value)}
-              placeholder={"MC1\tMC\t1\t中\t2.6.1\t計算功\tA\nLQ1a\tLQ\t2\t淺\t2.6.2\t計算勢能\t"} />
+              placeholder={"MC1\tMC\t1\t中\t1.1\t示例\tA\nMC2\tMC\t1\t中\t1.2\t多正解例\tB,D\nLQ1a\tLQ\t2\t淺\t1.3\t示例\t"} />
           </label>
+
           <div className="flex flex-wrap gap-2">
             <button disabled={busy} className="bg-purple-600 text-white font-bold px-5 py-2.5 rounded-xl text-sm disabled:opacity-50" onClick={handleSave}>
               {busy ? "儲存中…" : "儲存到 Firebase"}
