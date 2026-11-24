@@ -530,6 +530,77 @@ async function deleteExamScore(studentId, examId) {
   await db.collection("scores").doc(studentId).collection("exams").doc(String(examId)).delete();
 }
 
+
+/** Gemini 原生 Quiz 模式 Prompt（禁止 Canvas／純文字逐題） */
+function buildGeminiNativeQuizPrompt(opts) {
+  const o = opts || {};
+  const title = o.title || "化學補底練習";
+  const studentLabel = o.studentLabel || "";
+  const contextLabel = o.contextLabel || "補底練習";
+  const level = o.level || "中";
+  const n = Math.max(1, parseInt(o.mcCount, 10) || 10);
+  const topics = (o.topics || []).filter(x => x && (x.id || x.topicId));
+  const syllabusText = o.syllabusText || "";
+  const extraNotes = o.extraNotes || "";
+  const useEng = o.lang === "ENG" || o.lang === "English" || o.lang === "英文";
+  const langName = useEng ? "English" : "繁體中文";
+
+  const normalized = topics.map(x => ({
+    id: String(x.id || x.topicId),
+    detail: x.detail || x.title || x.label || "",
+    pct: x.pct != null ? x.pct : null
+  }));
+
+  let allocCounts = [];
+  if (normalized.length) {
+    const base = Math.floor(n / normalized.length);
+    let rem = n - base * normalized.length;
+    normalized.forEach((_, i) => {
+      allocCounts.push(Math.max(1, base + (i < rem ? 1 : 0)));
+    });
+    const sum = allocCounts.reduce((a, b) => a + b, 0);
+    if (sum > n && normalized.length > n) {
+      allocCounts = normalized.map(() => null);
+    }
+  }
+
+  const rangeBlock = normalized.length
+    ? normalized.map((t, i) => {
+        const cnt = allocCounts[i];
+        const countHint = cnt != null ? `（分配約 ${cnt} 題）` : "";
+        const pct = t.pct != null ? `；得分率約 ${t.pct}%` : "";
+        return `${i + 1}. [${t.id}] ${t.detail || t.id}${pct}${countHint}`;
+      }).join("\n")
+    : "（按相關課程範圍出由淺入深的鞏固題；每題題幹開頭仍須標明 topicId）";
+
+  return `請直接使用 Gemini 內建的【互動式測驗功能（Quiz 模式 / 測驗工具）】生成一份 ${n} 題選擇題測驗。
+
+⚠️ 系統執行限制（必須嚴格遵守）：
+1. 必須觸發並開啟 Gemini 原生的互動測驗介面（右上角顯示答對/答錯計數的原生測驗卡片）。
+2. 絕對不要使用 Canvas 編寫 HTML/JS/React 網頁應用程式（不要寫 code）。
+3. 絕對不要在對話框中以純文字逐題一問一答，也不要在對話框直接列出題目與答案。
+4. 測驗介面內的所有題目、選項（A/B/C/D）、提示與詳解，必須 100% 使用【${langName}】（化學式／單位符號除外）。
+
+【學生與考試資訊】
+- 測驗標題：${title}${studentLabel ? `（${studentLabel}）` : ""}
+- 科目：香港中學文憑試（HKDSE）化學科
+- 情境：${contextLabel}
+- 難度：${level}（由淺入深，適合基礎補底）
+- 題數：共 ${n} 題四選一選擇題（每題 4 個選項）
+
+【出題範圍與失分重點】（只考以下課題，每題題幹開頭必須標明 [topicId]，例如「[1.1] 下列哪項…」）：
+${rangeBlock}
+
+【課程大綱參考】
+${syllabusText || "（見上方課題與學習要求）"}
+
+【題目與解說要求】
+- 每題題幹最前方必須加上課題編號，格式為：[topicId]。
+- 為每個錯誤選項設計具針對性的「迷思解說（反饋）」，當學生選錯時清楚指出其概念迷思或常見計算／單位錯誤。
+- 在對話框開頭，只需用${useEng ? "英文" : "繁體中文"}寫一句簡短、鼓勵學生的說話，說明這是今日的「${contextLabel}」，然後立即啟動測驗介面。
+${extraNotes ? "\n" + extraNotes : ""}`;
+}
+
 async function loadExamMakeup(examId) {
   const snap = await db.collection("examMakeup").doc(String(examId)).get();
   return snap.exists ? (snap.data().students || {}) : {};
@@ -1701,39 +1772,29 @@ function HwGradeView({ activeStudents, homeworkMaps, homeworkScores, setHomework
     }).join("\n") || "- （請自行補充難點）";
     const topicIds = list.map(q => q.topicId).filter(Boolean);
     const syllabus = getSyllabusTableText(topicIds);
-
-    const tasks = [];
-    if (aiExtra.practice) {
-      tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」，繁體中文，貼近 HKDSE。MC 附常見錯項陷阱；LQ 附分步評分。每題請標明對應 topicId。`);
+    const topicObjs = list.map(q => ({
+      id: q.topicId || q.id,
+      detail: q.topicDesc || q.desc || String(q.topicId || q.id),
+      pct: q.rate != null ? Math.round(q.rate * 100) : null
+    })).filter(x => x.id);
+    const extras = [];
+    extras.push("【難點列表】\n" + weakList);
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖片：每條弱項 1 張簡報用概念圖描述，註明 topicId。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁，標明 topicId。");
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記：定義 → 公式 → 易錯點 → 一例題。");
+    if (aiLq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLq} 題短答 LQ（勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】根據功課「${selectedHw}：${map?.title || ""}」弱項產出教材（不需測驗）。\n\n【難點】\n${weakList}\n\n【課程大綱】\n${syllabus}\n\n` + extras.join("\n");
     }
-    if (aiExtra.explainImg) {
-      tasks.push(`B. 解說圖片：為上述每條弱項各設計 1 張「可在簡報使用」的概念圖／示意圖描述（構圖、標註、重點公式），並註明 topicId。`);
-    }
-    if (aiExtra.ppt) {
-      tasks.push(`C. PPT 大綱：以勾選弱項為綱，8–12 頁（標題、要點、建議圖示、口述提示），標明 topicId。`);
-    }
-    if (aiExtra.notes) {
-      tasks.push(`D. 溫習筆記：定義 → 公式 → 易錯點 → 一例題，對應 topicId。`);
-    }
-    if (!tasks.length) tasks.push(`A. 針對性練習卷：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ。`);
-
-    return `【身份】你是香港 DSE 化學科老師，學生約 Band 3。
-
-【任務】根據以下「功課弱項診斷」（功課 ${selectedHw}：${map?.title || ""}），完成指定產出。
-
-【難點列表】（每項含 topicId）
-${weakList}
-
-【課程大綱參考】（僅列相關 Topic ID）
-${syllabus}
-
-【產出要求】
-${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
-
-【其他】
-- 語言：繁體中文
-- 題目須對應弱項與 topicId，由淺入深
-- 不要多餘開場白，直接給內容`;
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedHw} 功課弱項練習`,
+      contextLabel: "功課弱項補底",
+      level: aiLevel,
+      mcCount: aiMc,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      extraNotes: extras.join("\n")
+    });
   };
 
   const copyPrompt = () => {
@@ -2510,34 +2571,24 @@ function QuizInputAnalysisView({ activeStudents, quizMaps, quizScores, setQuizSc
     }
     const syllabus = getSyllabusTableText(allTopicIds);
 
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】為以下「補測」學生設計一份【互動式小測驗】，必須在 AI 的 **Canvas（畫布）模式** 中生成，讓學生可在對話中逐題作答、即時回饋。
-
-【小測範圍】${map?.title || selectedQuiz}
-
-【補測學生】
-${lines}
-
-【學生個人弱點】（每項必須含 topicId；請針對這些弱點出題）
-${personalWeakBlocks}
-
-【課程大綱參考】（相關 Topic ID 與學習要求）
-${syllabus}
-
-【基本設定】
-- 語言：繁體中文
-- 難度：${mkLevel}
-- 多項選擇題 (MC)：${mkMc} 題（預設 10）
-- 長題目 (LQ)：${mkLq} 題
-- ★ 必須強調：以「互動式小測驗」形式、在 **Canvas** 中呈現（逐題顯示、學生作答後再給對錯與簡短解說）
-
-【要求】
-1. 題目必須針對上方「學生個人弱點」的 topicId 與考點，由淺入深。
-2. 每題標明對應 topicId。
-3. MC 附 4 選項；答錯時指出迷思。
-4. 不要一次公開全部答案；先出題，待學生回答再評。
-5. 開頭用一句話說明這是補測練習，語氣鼓勵。`;
+    const topicObjs = [];
+    const seen = {};
+    allTopicIds.forEach(id => {
+      const k = String(id);
+      if (!seen[k]) { seen[k] = true; topicObjs.push({ id: k, detail: k, pct: null }); }
+    });
+    const extra = `【補測學生】\n${lines}\n\n【學生個人弱點】（請針對這些弱點出題）\n${personalWeakBlocks}`
+      + (mkLq > 0 ? `\n\n【附加】測驗結束後可以文字附上 ${mkLq} 題短答 LQ（勿用 Canvas）。` : "");
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedQuiz} 補測練習`,
+      studentLabel: ids.length === 1 ? lines.replace(/^-\s*/, "") : `${ids.length} 位補測學生`,
+      contextLabel: "小測補測練習",
+      level: mkLevel,
+      mcCount: mkMc,
+      topics: topicObjs.length ? topicObjs : [{ id: "（範圍）", detail: map?.title || selectedQuiz }],
+      syllabusText: syllabus,
+      extraNotes: extra
+    });
   };
 
   // class analysis for selected quiz
@@ -2588,27 +2639,30 @@ ${syllabus}
     const weakQ = list.map(q => formatWeakItem(q, `全班得分率 ${Math.round(q.pct)}%，老師預設：${q.level || "中"}`)).join("\n") || "- （無）";
     const topicIds = list.map(q => q.topicId).filter(Boolean);
     const syllabus = getSyllabusTableText(topicIds);
-    const tasks = [];
-    if (aiExtra.practice) tasks.push(`A. 針對性練習：出 ${aiMc} 題 MC 與 ${aiLq} 題 LQ，難度「${aiLevel}」。MC 附常見錯項；LQ 附分步評分。每題標明 topicId。貼近 HKDSE。`);
-    if (aiExtra.review) tasks.push(`B. 約 15 分鐘試後檢討大綱：弱項概念日常例子、常見迷思、3 條堂上 Concept Checking Questions（對應 topicId）。`);
-    if (aiExtra.explainImg) tasks.push(`C. 解說圖片：每條弱項 1 張簡報用概念圖文字描述（構圖、標註、公式），註明 topicId。`);
-    if (aiExtra.ppt) tasks.push(`D. PPT 大綱：8–12 頁（標題、要點、建議圖示、口述提示），標明 topicId。`);
-    if (aiExtra.notes) tasks.push(`E. 溫習筆記：定義 → 公式 → 易錯點 → 一例題，對應 topicId。`);
-    if (!tasks.length) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ。`);
-    return `【身份】你是香港 DSE 化學科老師，學生約 Band 3。
-
-【任務】全班剛完成小測「${map?.title || selectedQuiz}」（全班平均得分率 ${classStats.avgPct.toFixed(1)}%，${classStats.attempted} 人已入分）。
-
-【弱項／選中題目】（每項含 topicId）
-${weakQ}
-
-【課程大綱參考】（相關 Topic ID）
-${syllabus}
-
-【產出要求】
-${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
-
-【其他】繁體中文；題目須對應 topicId；直接給內容，不要多餘開場白。`;
+    const topicObjs = list.map(q => ({
+      id: q.topicId || q.id,
+      detail: q.topicDesc || q.desc || String(q.topicId || q.id),
+      pct: q.pct != null ? Math.round(q.pct) : null
+    })).filter(x => x.id);
+    const extras = [];
+    extras.push("【弱項／選中題目】\n" + weakQ);
+    if (aiExtra.review) extras.push("【另請產出】約 15 分鐘試後檢討大綱：弱項概念、常見迷思、3 條 Concept Checking（對應 topicId）。");
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖片描述（每弱項 1 張），註明 topicId。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁，標明 topicId。");
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記：定義 → 公式 → 易錯點 → 一例題。");
+    if (typeof aiLq !== "undefined" && aiLq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLq} 題短答 LQ（勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】全班小測「${map?.title || selectedQuiz}」試後教材（不需測驗）。\n\n【弱項】\n${weakQ}\n\n【課程大綱】\n${syllabus}\n\n` + extras.join("\n");
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedQuiz} 全班弱項練習`,
+      contextLabel: "小測試後補底",
+      level: aiLevel,
+      mcCount: aiMc,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      extraNotes: extras.join("\n")
+    });
   };
 
   const copyQuizPrompt = () => {
@@ -2808,7 +2862,7 @@ ${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
         </div>
         <div className="rounded-2xl border-2 border-violet-300 bg-violet-50 p-4 space-y-3">
           <div className="font-black text-violet-900 text-base">補測 AI Prompt</div>
-          <p className="text-xs text-violet-800">會附上<strong>每位學生個人弱點（含 topicId）</strong>與<strong>課程大綱</strong>；Canvas 互動式小測驗。</p>
+          <p className="text-xs text-violet-800">會附上<strong>每位學生個人弱點（含 topicId）</strong>與<strong>課程大綱</strong>；使用 Gemini 原生 Quiz 模式。</p>
           <div className="grid sm:grid-cols-3 gap-3">
             <label className="text-sm font-bold text-slate-700">難度
               <select className="mt-1 w-full border-2 border-violet-200 rounded-lg px-3 py-2 text-sm" value={mkLevel} onChange={e=>setMkLevel(e.target.value)}>
@@ -3388,32 +3442,35 @@ function QuizStudentAnalysisView({ activeStudents, quizMaps, currentCohort }) {
     const syllabus = getSyllabusTableText(topicIds);
     const scoreSummary = rows.filter(r => qids.includes(r.qid) && r.total != null)
       .map(r => `- ${r.qid} ${r.title}: ${r.total}/${r.max}（${Math.round(r.pct)}%）`).join("\n") || "- 尚無成績";
-    const tasks = [];
-    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ，難度「${aiLevel}」。每題標明 topicId。`);
-    if (aiExtra.explainImg) tasks.push(`B. 解說圖描述，註明 topicId。`);
-    if (aiExtra.ppt) tasks.push(`C. PPT 大綱 8–12 頁。`);
-    if (aiExtra.notes) tasks.push(`D. 溫習筆記。`);
-    if (!tasks.length) tasks.push(`A. 練習 ${aiMc} MC + ${aiLq} LQ。`);
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】為學生 ${student ? `${student.class}-${student.num} ${student.name}` : sid} 生成個人化補底材料。
-
-【納入的小測】${qids.join("、") || "（無）"}
-
-【各小測表現】
-${scoreSummary}
-
-【個人弱點】（含 topicId）
-${weakList}
-
-【課程大綱參考】
-${syllabus}
-
-【產出要求】
-${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
-
-【其他】繁體中文；對應 topicId；直接給內容。`;
+    const name = student ? `${student.class}-${student.num} ${student.name}` : sid;
+    const topicObjs = weakItems.slice(0, 24).map(q => ({
+      id: q.topicId || q.id,
+      detail: q.topicDesc || q.desc || String(q.topicId || q.id),
+      pct: q.max ? Math.round((q.score / q.max) * 100) : null
+    })).filter(x => x.id);
+    const extras = [];
+    extras.push("【納入小測】" + (qids.join("、") || "（無）"));
+    extras.push("【各小測表現】\n" + scoreSummary);
+    extras.push("【個人弱點】\n" + weakList);
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖描述，註明 topicId。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記。");
+    if (aiLq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLq} 題短答 LQ（勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】為 ${name} 生成個人化補底教材（不需測驗）。\n\n` + extras.join("\n\n") + `\n\n【課程大綱】\n${syllabus}`;
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `個人小測補底練習`,
+      studentLabel: name,
+      contextLabel: "個人小測補底",
+      level: aiLevel,
+      mcCount: aiMc,
+      topics: topicObjs.length ? topicObjs : [{ id: "複習", detail: "已選小測範圍" }],
+      syllabusText: syllabus,
+      extraNotes: extras.join("\n")
+    });
   };
+
 
   return (
     <div className="space-y-4">
@@ -4223,28 +4280,32 @@ function ExamInputAnalysisView({ activeStudents, examMaps, examScores, setExamSc
     const weakQ = list.map(q => formatWeakItem(q, `全班得分率 ${q.pct == null ? "—" : Math.round(q.pct) + "%"}，難度體感：${q.diag}`)).join("\n") || "- （無）";
     const topicIds = list.map(q => q.topicId).filter(Boolean);
     const syllabus = getSyllabusTableText(topicIds);
-    const tasks = [];
-    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ，難度「${aiLevel}」。每題標明 topicId。`);
-    if (aiExtra.review) tasks.push(`B. 約 15 分鐘試後檢討大綱（迷思、3 條 Concept Checking）。`);
-    if (aiExtra.explainImg) tasks.push(`C. 解說圖描述。`);
-    if (aiExtra.ppt) tasks.push(`D. PPT 大綱 8–12 頁。`);
-    if (aiExtra.notes) tasks.push(`E. 溫習筆記。`);
-    if (!tasks.length) tasks.push(`A. 練習 ${aiMc} MC + ${aiLq} LQ。`);
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】全班剛完成考試「${map?.title || selectedExam}」（已入分 ${attemptedStudents.length} 人${classAvg != null ? `，加權平均約 ${classAvg.toFixed(1)}` : ""}）。
-
-【弱項／選中題目】（含 topicId）
-${weakQ}
-
-【課程大綱參考】
-${syllabus}
-
-【產出要求】
-${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
-
-【其他】繁體中文；對應 topicId；直接給內容。`;
+    const topicObjs = list.map(q => ({
+      id: q.topicId || q.id,
+      detail: q.topicDesc || q.desc || String(q.topicId || q.id),
+      pct: q.pct != null ? Math.round(q.pct) : null
+    })).filter(x => x.id);
+    const extras = [];
+    extras.push("【弱項／選中題目】\n" + weakQ);
+    if (aiExtra.review) extras.push("【另請產出】約 15 分鐘試後檢討大綱（迷思、3 條 Concept Checking）。");
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖描述。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記。");
+    if (aiLq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLq} 題短答 LQ（勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】考試「${map?.title || selectedExam}」試後教材。\n\n【弱項】\n${weakQ}\n\n【課程大綱】\n${syllabus}\n\n` + extras.join("\n");
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedExam} 考試弱項練習`,
+      contextLabel: "考試試後補底",
+      level: aiLevel,
+      mcCount: aiMc,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      extraNotes: extras.join("\n")
+    });
   };
+
 
   if (!examIds.length) {
     return <div className="p-8 text-slate-400">尚未有考試藍圖。請先到「考試內容設定」或匯入 examMaps。</div>;
@@ -4699,27 +4760,39 @@ function ExamPersonalAnalysisView({ activeStudents, examMaps, currentCohort }) {
 
   const studentName = activeStudents.find(s => s.id === selectedStudentId)?.name || "該學生";
   const generatedPrompt = useMemo(() => {
-    if (!selectedStudentId || !selectedTopics.length) return "👈 請勾選至少一個弱點課題。";
+    if (!selectedStudentId || !selectedTopics.length || !studentAnalysis.topics.length) {
+      return "👈 請先從下方勾選至少一個弱點課題。";
+    }
     const targetTopics = studentAnalysis.topics.filter(t => selectedTopics.includes(t.topicId));
     const weakTopicsText = targetTopics.map(t =>
-      `- 課題 [${t.topicId} ${t.topicName}]: 得分率 ${(t.overallPct*100).toFixed(0)}%｜學習要求: ${t.syllabusDesc || "—"}｜錯因: ${t.errorDescArray.join("; ") || "綜合薄弱"}`
-    ).join("\n");
+      `- 課題 [${t.topicId} ${t.topicName}]:\n  已選卷平均得分率: ${(t.overallPct * 100).toFixed(0)}%\n  官方學習要求: ${t.syllabusDesc || "—"}\n  具體錯因: ${t.errorDescArray.join("; ") || "綜合概念薄弱"}`
+    ).join("\n\n");
     const syllabus = getSyllabusTableText(targetTopics.map(t => t.topicId));
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】學生【${studentName}】在校內考試中，下列課題得分率 ≤60%。請設計補底練習。
-
-【基本設定】語言 ${aiLang}；MC ${aiMcCount}；LQ ${aiLqCount}
-★ 若出練習，請用 Canvas 互動式小測驗形式。
-
-【重災區】
-${weakTopicsText}
-
-【課程大綱參考】
-${syllabus}
-
-【要求】針對錯因出題；MC 附 4 選項；每題標 topicId；開頭一句鼓勵。
-${aiExtra.notes ? "\\n【另】溫習筆記條列。" : ""}${aiExtra.ppt ? "\\n【另】PPT 大綱 8–12 頁。" : ""}${aiExtra.explainImg ? "\\n【另】解說圖描述。" : ""}`;
+    const topicObjs = targetTopics.map(t => ({
+      id: t.topicId,
+      detail: `${t.topicName || ""}；錯因：${(t.errorDescArray || []).join("；") || "綜合薄弱"}`,
+      pct: Math.round(t.overallPct * 100)
+    }));
+    const extras = [];
+    extras.push("【學生重災區課題與具體錯因】\n" + weakTopicsText);
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記：條列重點、公式、常見陷阱。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖描述（每弱項 1 段）。");
+    if (aiLqCount > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLqCount} 題短答 LQ（含 DSE 評分標準；勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科權威專家。\n\n【任務】為【${studentName}】產出考試補底教材（不需測驗）。\n\n` + extras.join("\n\n") + `\n\n【課程大綱】\n${syllabus}`;
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `考試專屬補底（${studentName}）`,
+      studentLabel: studentName,
+      contextLabel: "考試重災區補底",
+      level: "中",
+      mcCount: aiMcCount,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      lang: aiLang === "English" ? "ENG" : "CHI",
+      extraNotes: extras.join("\n")
+    });
   }, [aiLang, aiMcCount, aiLqCount, selectedTopics, selectedStudentId, studentAnalysis, studentName, aiExtra]);
 
   return (
@@ -5127,28 +5200,23 @@ function ExamMakeupView({ activeStudents, examMaps, examScores, setExamScores, c
         }).join("\n")
       : "- （尚未指定課題：請按考試範圍與學生程度出由淺入深的鞏固練習）";
     const syllabus = getSyllabusTableText(chosen);
-    return `【身份】你是香港 DSE 化學科老師，正在為學生進行【分日補底／補考練習】。
-
-【學生】${name}
-【考試】${map?.title || selectedExam}
-【今次只處理以下課題】（按 topicId 排序；其餘日後再補，不要一次出完全部）
-${lines}
-
-【課程大綱參考】
-${syllabus}
-
-【基本設定】
-- 語言：繁體中文
-- 難度：${mkLevel}
-- MC：${mkMc} 題；LQ：${mkLq} 題
-- ★ 必須用 AI **Canvas（畫布）** 做成【互動式小測驗】：逐題顯示、學生作答後再給對錯與簡短解說
-
-【要求】
-1. 緊貼上述 topicId 與失分點，由淺入深，適合能力一般、時間有限的學生。
-2. MC 附 4 選項；答錯指出迷思。
-3. 不要一次公開全部答案。
-4. 開頭用一句話說明這是今日補底練習，語氣鼓勵、簡短。
-5. 每題標明 topicId。`;
+    const topicObjs = chosen.map(tid => {
+      const tp = topics[tid] || {};
+      return { id: tid, detail: tp.label || tid, pct: tp.pct };
+    });
+    const extra = mkLq > 0
+      ? `【附加】除上述 ${mkMc} 題 MC 原生測驗外，可在測驗結束後另以文字附上 ${mkLq} 題短答 LQ（仍勿用 Canvas）。`
+      : "";
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedExam} 化學補底練習`,
+      studentLabel: name,
+      contextLabel: "分日補底／補考練習",
+      level: mkLevel,
+      mcCount: mkMc,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      extraNotes: extra
+    });
   };
 
   if (!examIds.length) {
@@ -5452,7 +5520,7 @@ ${syllabus}
                     }
                     navigator.clipboard.writeText(buildPrompt(focus)).then(()=>alert("已複製今次補底 Prompt" + (chosen.length ? `（${chosen.length} 課題）` : "（未指定課題）"))).catch(()=>alert("失敗"));
                   }}>
-                  複製 Canvas 互動補底 Prompt
+                  複製 Gemini Quiz 補底 Prompt
                 </button>
               </div>
             </>
@@ -6127,27 +6195,31 @@ function PastpaperInputAnalysisView({ activeStudents, pastpaperMaps, pastpaperSc
     const lines = qs.map(q => formatWeakItem(q, `全班得分率 ${q.pct == null ? "—" : Math.round(q.pct) + "%"}`)).join("\n");
     const topicIds = qs.map(q => q.topicId).filter(Boolean);
     const syllabus = getSyllabusTableText(topicIds);
-    const tasks = [];
-    if (aiExtra.practice) tasks.push(`A. 針對性練習：${aiMc} MC + ${aiLq} LQ，難度「${aiLevel}」。每題標明 topicId。`);
-    if (aiExtra.explainImg) tasks.push(`B. 解說圖描述（每弱項）。`);
-    if (aiExtra.ppt) tasks.push(`C. PPT 大綱 8–12 頁。`);
-    if (aiExtra.notes) tasks.push(`D. 溫習筆記。`);
-    if (!tasks.length) tasks.push(`A. 練習 ${aiMc} MC + ${aiLq} LQ。`);
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】全班剛完成歷屆試題「${map?.title || selectedPaper}」。請針對下列盲點出教材／練習。
-
-【錯題／弱項】（含 topicId 與描述）
-${lines}
-
-【課程大綱參考】
-${syllabus}
-
-【產出】
-${tasks.map((x,i)=>`${i+1}. ${x}`).join("\n")}
-
-【其他】繁體中文；對應 topicId；直接給內容。`;
+    const topicObjs = qs.map(q => ({
+      id: q.topicId || q.id,
+      detail: q.topicDesc || q.desc || String(q.topicId || q.id),
+      pct: q.pct != null ? Math.round(q.pct) : null
+    })).filter(x => x.id);
+    const extras = [];
+    extras.push("【錯題／弱項】\n" + lines);
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖描述（每弱項）。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記。");
+    if (aiLq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLq} 題短答 LQ（勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】歷屆試題「${map?.title || selectedPaper}」盲點教材。\n\n【弱項】\n${lines}\n\n【課程大綱】\n${syllabus}\n\n` + extras.join("\n");
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `${map?.title || selectedPaper} 錯題補底`,
+      contextLabel: "Pastpaper 錯題補底",
+      level: aiLevel,
+      mcCount: aiMc,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      extraNotes: extras.join("\n")
+    });
   };
+
 
   if (!paperIds.length) {
     return <div className="p-8 text-slate-400">尚未有 Pastpaper 題庫。請到「Pastpaper 題庫設定」用 JSON 匯入。</div>;
@@ -6624,29 +6696,31 @@ function PastpaperPersonalAnalysisView({ activeStudents, pastpaperMaps }) {
       `- 課題 [${t.topicId} ${t.topicName}]:\n  已選卷平均得分率: ${(t.overallPct * 100).toFixed(0)}%\n  官方學習要求: ${t.syllabusDesc || "—"}\n  具體錯因: ${t.errorDescArray.join("; ") || "綜合概念薄弱"}`
     ).join("\n\n");
     const syllabus = getSyllabusTableText(targetTopics.map(t => t.topicId));
-    return `【身份】你是香港 DSE 化學科權威專家。
-
-【任務】學生【${studentName}】在近幾年 Pastpaper 操練中，下列課題得分率 ≤60%。請針對錯因度身訂造強效補底卷。
-
-【基本設定】
-- 語言: ${aiLang}
-- MC：${aiMcCount} 題；LQ：${aiLqCount} 題
-
-【學生重災區課題與具體錯因】
-${weakTopicsText}
-
-【課程大綱參考】
-${syllabus}
-
-【生成要求】
-1. 針對「具體錯因」設計針對性題目，釐清最常混淆觀念。
-2. MC 附 4 選項與【陷阱破解分析】；LQ 附【DSE 評分標準】與【解題思路】。
-3. 開頭給【${studentName}】一段簡短有力鼓勵。
-4. 每題標明 topicId。
-${aiExtra.practice ? "" : "5. （可不生成練習題，改以下列產出為主）"}
-${aiExtra.notes ? "\n【另請產出】溫習筆記：條列重點、公式、常見陷阱。" : ""}
-${aiExtra.ppt ? "\n【另請產出】PPT 大綱 8–12 頁（每頁標題+要點）。" : ""}
-${aiExtra.explainImg ? "\n【另請產出】解說圖描述：可用於 AI 繪圖的場景說明（每弱項 1 段）。" : ""}`;
+    const topicObjs = targetTopics.map(t => ({
+      id: t.topicId,
+      detail: `${t.topicName || ""}；錯因：${(t.errorDescArray || []).join("；") || "綜合薄弱"}`,
+      pct: Math.round(t.overallPct * 100)
+    }));
+    const extras = [];
+    extras.push("【學生重災區課題與具體錯因】\n" + weakTopicsText);
+    if (aiExtra.notes) extras.push("【另請產出】溫習筆記：條列重點、公式、常見陷阱。");
+    if (aiExtra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (aiExtra.explainImg) extras.push("【另請產出】解說圖描述（每弱項 1 段）。");
+    if (aiLqCount > 0) extras.push(`【附加】測驗結束後可以文字附上 ${aiLqCount} 題短答 LQ（含 DSE 評分標準；勿用 Canvas）。`);
+    if (!aiExtra.practice) {
+      return `【身份】你是香港 DSE 化學科權威專家。\n\n【任務】為【${studentName}】產出 Pastpaper 補底教材（不需測驗）。\n\n` + extras.join("\n\n") + `\n\n【課程大綱】\n${syllabus}`;
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `Pastpaper 專屬補底（${studentName}）`,
+      studentLabel: studentName,
+      contextLabel: "Pastpaper 重災區補底",
+      level: "中",
+      mcCount: aiMcCount,
+      topics: topicObjs,
+      syllabusText: syllabus,
+      lang: aiLang === "English" ? "ENG" : "CHI",
+      extraNotes: extras.join("\n")
+    });
   }, [aiLang, aiMcCount, aiLqCount, selectedTopics, selectedStudentId, studentAnalysis, studentName, aiExtra]);
 
   const togglePaper = (pid) => setSelectedPapers(prev => prev.includes(pid) ? prev.filter(p => p !== pid) : [...prev, pid]);
