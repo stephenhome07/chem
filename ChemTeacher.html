@@ -1051,6 +1051,7 @@ function Sidebar({ view, setView, cohort, setCohort, cohorts, reload, loading })
       <div>
         <div className="text-[10px] font-black text-slate-400 uppercase mb-1">資料</div>
         <Item id="students" label="學生名單管理" />
+        <Item id="langSettings" label="修讀語言設定" />
         <Item id="promotion" label="新學年智慧升班" />
         <Item id="syllabus" label="課程大綱設定" />
         <Item id="caExport" label="平時分輸出" />
@@ -7205,6 +7206,263 @@ function ClassRankingView({ activeStudents, currentCohort, homeworkMaps, quizMap
 }
 
 
+
+function langLabel(lang) {
+  if (lang === "ENG" || lang === "ENGLISH" || lang === "English") return "ENGLISH";
+  if (lang === "CHI" || lang === "中文" || lang === "CHINESE") return "中文";
+  return "未設";
+}
+function normalizeLang(lang) {
+  if (lang === "ENG" || lang === "ENGLISH" || lang === "English") return "ENG";
+  if (lang === "CHI" || lang === "中文" || lang === "CHINESE") return "CHI";
+  return "";
+}
+
+function LanguageSettingsView({ students, onReload, currentCohort }) {
+  const cohorts = useMemo(
+    () => Array.from(new Set(students.map(s => s.cohort).filter(Boolean))).sort(),
+    [students]
+  );
+  const [selCohort, setSelCohort] = useState(
+    currentCohort && currentCohort !== "所有學生" ? currentCohort : (cohorts[0] || "")
+  );
+  const [busy, setBusy] = useState(false);
+  const [filterLang, setFilterLang] = useState("全部");
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    if (currentCohort && currentCohort !== "所有學生") setSelCohort(currentCohort);
+  }, [currentCohort]);
+
+  const activeList = useMemo(
+    () => students.filter(s => s.active !== false),
+    [students]
+  );
+
+  const statsAll = useMemo(() => {
+    const by = {};
+    cohorts.forEach(c => { by[c] = { CHI: 0, ENG: 0, unset: 0, total: 0 }; });
+    activeList.forEach(s => {
+      const c = s.cohort || "（無群組）";
+      if (!by[c]) by[c] = { CHI: 0, ENG: 0, unset: 0, total: 0 };
+      by[c].total++;
+      const l = normalizeLang(s.lang);
+      if (l === "CHI") by[c].CHI++;
+      else if (l === "ENG") by[c].ENG++;
+      else by[c].unset++;
+    });
+    return by;
+  }, [activeList, cohorts]);
+
+  const rows = useMemo(() => {
+    return activeList
+      .filter(s => {
+        if (selCohort && s.cohort !== selCohort) return false;
+        const l = normalizeLang(s.lang);
+        if (filterLang === "中文" && l !== "CHI") return false;
+        if (filterLang === "ENGLISH" && l !== "ENG") return false;
+        if (filterLang === "未設" && l) return false;
+        if (q) {
+          const hay = `${s.class} ${s.num} ${s.name} ${s.id}`.toLowerCase();
+          if (!hay.includes(q.toLowerCase())) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => String(a.class||"").localeCompare(String(b.class||"")) || (Number(a.num)||0)-(Number(b.num)||0));
+  }, [activeList, selCohort, filterLang, q]);
+
+  const setLang = async (sid, lang) => {
+    setBusy(true);
+    try {
+      await db.collection("students").doc(sid).set({
+        lang: lang || "",
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      if (onReload) await onReload();
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const bulkSet = async (lang) => {
+    if (!rows.length) return alert("目前列表沒有學生");
+    const label = langLabel(lang) || "未設";
+    if (!confirm(`將目前列表 ${rows.length} 人全部設為「${label}」？`)) return;
+    setBusy(true);
+    try {
+      let batch = db.batch();
+      let n = 0;
+      for (const s of rows) {
+        batch.set(db.collection("students").doc(s.id), {
+          lang: lang || "",
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        n++;
+        if (n >= 400) {
+          await batch.commit();
+          batch = db.batch();
+          n = 0;
+        }
+      }
+      if (n) await batch.commit();
+      if (onReload) await onReload();
+      alert("已更新 " + rows.length + " 人");
+    } catch (e) { alert(e.message); }
+    setBusy(false);
+  };
+
+  const exportCsv = () => {
+    const header = ["CLASS", "CLASS NUMBER", "NAME", "修讀語言", "群組", "學生ID"];
+    const body = rows.map(s => [
+      s.class || "",
+      s.num ?? "",
+      s.name || "",
+      langLabel(s.lang),
+      s.cohort || "",
+      s.id || ""
+    ]);
+    const csv = [header, ...body].map(r => r.map(c => {
+      const x = String(c ?? "");
+      return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x;
+    }).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `修讀語言_${selCohort || "全部"}_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  };
+
+  const curStat = statsAll[selCohort] || { CHI: 0, ENG: 0, unset: 0, total: 0 };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap justify-between gap-3 items-start">
+        <div>
+          <h2 className="font-bold text-xl text-indigo-900">修讀語言設定</h2>
+          <p className="text-sm text-slate-500">按群組為學生設定中文 / ENGLISH；可統計與匯出。</p>
+        </div>
+        <button disabled={busy || !rows.length} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-sm disabled:opacity-50" onClick={exportCsv}>
+          匯出 CSV
+        </button>
+      </div>
+
+      <div className="bg-white rounded-2xl border p-4">
+        <div className="text-sm font-bold text-slate-700 mb-2">各群組統計</div>
+        <div className="overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="text-left px-3 py-2 text-xs text-slate-500">群組</th>
+                <th className="text-center px-3 py-2 text-xs text-slate-500">總人數</th>
+                <th className="text-center px-3 py-2 text-xs text-indigo-700">中文</th>
+                <th className="text-center px-3 py-2 text-xs text-violet-700">ENGLISH</th>
+                <th className="text-center px-3 py-2 text-xs text-slate-400">未設</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.keys(statsAll).sort().map(c => {
+                const st = statsAll[c];
+                return (
+                  <tr key={c} className={`border-t cursor-pointer hover:bg-indigo-50 ${selCohort===c?"bg-indigo-50":""}`}
+                    onClick={() => setSelCohort(c)}>
+                    <td className="px-3 py-2 font-bold">{c}</td>
+                    <td className="px-3 py-2 text-center">{st.total}</td>
+                    <td className="px-3 py-2 text-center font-bold text-indigo-700">{st.CHI}</td>
+                    <td className="px-3 py-2 text-center font-bold text-violet-700">{st.ENG}</td>
+                    <td className="px-3 py-2 text-center text-slate-400">{st.unset}</td>
+                  </tr>
+                );
+              })}
+              {!Object.keys(statsAll).length && (
+                <tr><td colSpan={5} className="px-3 py-4 text-slate-400 text-center">尚無學生／群組</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border p-4 flex flex-wrap gap-3 items-end">
+        <label className="text-xs font-bold">群組
+          <select className="mt-1 block border-2 rounded-lg px-3 py-1.5 text-sm font-bold min-w-[180px]" value={selCohort} onChange={e=>setSelCohort(e.target.value)}>
+            {cohorts.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-bold">篩選語言
+          <select className="mt-1 block border rounded-lg px-2 py-1.5 text-sm" value={filterLang} onChange={e=>setFilterLang(e.target.value)}>
+            <option value="全部">全部</option>
+            <option value="中文">中文</option>
+            <option value="ENGLISH">ENGLISH</option>
+            <option value="未設">未設</option>
+          </select>
+        </label>
+        <label className="text-xs font-bold flex-1 min-w-[140px]">搜尋
+          <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" placeholder="班 / 號 / 姓名" value={q} onChange={e=>setQ(e.target.value)} />
+        </label>
+        <div className="flex flex-wrap gap-2 pb-0.5">
+          <button disabled={busy} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-200" onClick={()=>bulkSet("CHI")}>列表全設中文</button>
+          <button disabled={busy} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-violet-100 text-violet-800 border border-violet-200" onClick={()=>bulkSet("ENG")}>列表全設 ENGLISH</button>
+          <button disabled={busy} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 border border-slate-200" onClick={()=>bulkSet("")}>列表清空語言</button>
+        </div>
+      </div>
+
+      {selCohort && (
+        <div className="flex flex-wrap gap-3 text-sm">
+          <span className="font-bold text-slate-700">{selCohort}</span>
+          <span className="text-indigo-700 font-bold">中文 {curStat.CHI}</span>
+          <span className="text-violet-700 font-bold">ENGLISH {curStat.ENG}</span>
+          <span className="text-slate-400">未設 {curStat.unset}</span>
+          <span className="text-slate-500">顯示 {rows.length} 人</span>
+          {busy && <span className="text-amber-600 text-xs font-bold">儲存中…</span>}
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border overflow-auto max-h-[60vh]">
+        <table className="min-w-full text-sm">
+          <thead className="sticky top-0 bg-slate-50">
+            <tr>
+              {["班","號","姓名","修讀語言","操作"].map(h => (
+                <th key={h} className="text-left px-3 py-2 text-xs text-slate-500 font-bold">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(s => {
+              const l = normalizeLang(s.lang);
+              return (
+                <tr key={s.id} className="border-t">
+                  <td className="px-3 py-2">{s.class}</td>
+                  <td className="px-3 py-2">{s.num}</td>
+                  <td className="px-3 py-2 font-bold">{s.name}</td>
+                  <td className="px-3 py-2">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                      l==="CHI"?"bg-indigo-100 text-indigo-800":
+                      l==="ENG"?"bg-violet-100 text-violet-800":
+                      "bg-slate-100 text-slate-500"
+                    }`}>{langLabel(s.lang)}</span>
+                  </td>
+                  <td className="px-3 py-2 space-x-1 whitespace-nowrap">
+                    <button type="button" disabled={busy}
+                      className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${l==="CHI"?"bg-indigo-600 text-white border-indigo-700":"bg-white text-indigo-700 border-indigo-200"}`}
+                      onClick={()=>setLang(s.id, "CHI")}>中文</button>
+                    <button type="button" disabled={busy}
+                      className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${l==="ENG"?"bg-violet-600 text-white border-violet-700":"bg-white text-violet-700 border-violet-200"}`}
+                      onClick={()=>setLang(s.id, "ENG")}>ENGLISH</button>
+                    {l && (
+                      <button type="button" disabled={busy} className="text-xs font-bold px-2 py-1 rounded-lg text-slate-500"
+                        onClick={()=>setLang(s.id, "")}>清除</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {!rows.length && (
+              <tr><td colSpan={5} className="px-3 py-8 text-center text-slate-400">此群組沒有符合條件的學生</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 function StudentsManageView({ students, onReload }) {
   const [filterCohort, setFilterCohort] = useState("全部");
   const [filterClass, setFilterClass] = useState("全部");
@@ -7232,12 +7490,12 @@ function StudentsManageView({ students, onReload }) {
 
   const startEdit = (s) => {
     setEditId(s.id);
-    setForm({ class: s.class || "", num: s.num ?? "", name: s.name || "", cohort: s.cohort || "", id: s.id });
+    setForm({ class: s.class || "", num: s.num ?? "", name: s.name || "", cohort: s.cohort || "", id: s.id, lang: normalizeLang(s.lang) });
   };
 
   const startAdd = () => {
     setEditId("__new__");
-    setForm({ class: "", num: "", name: "", cohort: filterCohort !== "全部" ? filterCohort : (cohorts[0] || ""), id: "" });
+    setForm({ class: "", num: "", name: "", cohort: filterCohort !== "全部" ? filterCohort : (cohorts[0] || ""), id: "", lang: "" });
   };
 
   const save = async () => {
@@ -7258,7 +7516,7 @@ function StudentsManageView({ students, onReload }) {
         if (exists) return alert("此 ID 已存在：" + sid);
         await db.collection("students").doc(sid).set({
           id: sid, sid, class: form.class.trim(), num: isNaN(Number(form.num)) ? form.num : Number(form.num),
-          name: form.name.trim(), cohort: form.cohort.trim(), pin: "", active: true,
+          name: form.name.trim(), cohort: form.cohort.trim(), lang: normalizeLang(form.lang), pin: "", active: true,
           updatedAt: new Date().toISOString()
         }, { merge: true });
         alert("已新增學生 " + sid);
@@ -7268,6 +7526,7 @@ function StudentsManageView({ students, onReload }) {
           num: isNaN(Number(form.num)) ? form.num : Number(form.num),
           name: form.name.trim(),
           cohort: form.cohort.trim(),
+          lang: normalizeLang(form.lang),
           updatedAt: new Date().toISOString()
         };
         await db.collection("students").doc(editId).set(patch, { merge: true });
@@ -7363,6 +7622,13 @@ function StudentsManageView({ students, onReload }) {
               <input className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" list="cohort-list" value={form.cohort} onChange={e=>setForm(f=>({...f,cohort:e.target.value}))} />
               <datalist id="cohort-list">{cohorts.map(c=><option key={c} value={c} />)}</datalist>
             </label>
+            <label className="text-xs font-bold">修讀語言
+              <select className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm" value={form.lang || ""} onChange={e=>setForm(f=>({...f,lang:e.target.value}))}>
+                <option value="">未設</option>
+                <option value="CHI">中文</option>
+                <option value="ENG">ENGLISH</option>
+              </select>
+            </label>
           </div>
           <div className="flex gap-2">
             <button disabled={busy} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm disabled:opacity-50" onClick={save}>{busy?"儲存中…":"儲存"}</button>
@@ -7375,7 +7641,7 @@ function StudentsManageView({ students, onReload }) {
         <table className="min-w-full text-sm">
           <thead className="sticky top-0 bg-slate-50">
             <tr>
-              {["主鍵 ID","班","號","姓名","群組","狀態","操作"].map(h => (
+              {["主鍵 ID","班","號","姓名","群組","修讀語言","狀態","操作"].map(h => (
                 <th key={h} className="text-left px-3 py-2 text-xs text-slate-500 font-bold">{h}</th>
               ))}
             </tr>
@@ -7388,6 +7654,7 @@ function StudentsManageView({ students, onReload }) {
                 <td className="px-3 py-2">{s.num}</td>
                 <td className="px-3 py-2 font-bold text-base">{s.name}</td>
                 <td className="px-3 py-2 text-xs">{s.cohort || "—"}</td>
+                <td className="px-3 py-2 text-xs font-bold">{langLabel(s.lang)}</td>
                 <td className="px-3 py-2 text-xs">{s.active===false ? "停用" : "使用中"}</td>
                 <td className="px-3 py-2 space-x-2 whitespace-nowrap">
                   <button className="text-indigo-600 font-bold text-xs" onClick={()=>startEdit(s)}>編輯</button>
@@ -8411,6 +8678,7 @@ function App() {
         {loading && <div className="text-xs text-slate-400 mb-2">載入中…</div>}
         {view==="ranking" && <ClassRankingView activeStudents={activeStudents} currentCohort={cohort} homeworkMaps={homeworkMaps} quizMaps={quizMaps} examMaps={examMaps} pastpaperMaps={pastpaperMaps} />}
         {view==="students" && <StudentsManageView students={students} onReload={reload} />}
+        {view==="langSettings" && <LanguageSettingsView students={students} onReload={reload} currentCohort={cohort} />}
         {view==="promotion" && <StudentPromotionView students={students} onReload={reload} />}
         {view==="syllabus" && <SyllabusSettingsView students={students} />}
         {view==="caExport" && <ContinuousAssessView students={students} homeworkMaps={homeworkMaps} examMaps={examMaps} currentCohort={cohort} />}
