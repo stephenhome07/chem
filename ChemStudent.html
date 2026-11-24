@@ -51,16 +51,96 @@ function isJuniorClass(stu) {
   const c = String(stu?.class || "").toUpperCase();
   return /^S[345]/.test(c) || c.startsWith("3") || c.startsWith("4") || c.startsWith("5");
 }
+function parseMcAnswerKey(ans) {
+  if (ans == null || String(ans).trim() === "") return [];
+  let s = String(ans).toUpperCase().trim();
+  s = s.replace(/或/g, ",").replace(/[\/|、；;]/g, ",");
+  let parts = s.split(",").map(x => x.trim()).filter(Boolean);
+  if (parts.length === 1 && /^[A-D]{2,4}$/.test(parts[0])) parts = parts[0].split("");
+  const out = [];
+  parts.forEach(p => {
+    const m = p.match(/[A-D]/);
+    if (m && !out.includes(m[0])) out.push(m[0]);
+  });
+  return out;
+}
 function quizQuestionScore(q, raw) {
   if (raw === undefined || raw === null || String(raw).trim() === "") return null;
   if (q.type === "MC") {
     if (!q.ans) return 0;
-    const corrects = q.ans.toString().split(",").map(a => a.trim().toUpperCase());
-    return corrects.includes(String(raw).trim().toUpperCase()) ? (q.max || 1) : 0;
+    const corrects = parseMcAnswerKey(q.ans);
+    if (!corrects.length) return 0;
+    const student = String(raw).trim().toUpperCase().replace(/[^A-D]/g, "");
+    if (student.length === 1) return corrects.includes(student) ? (q.max || 1) : 0;
+    if (student.length > 1) return student.split("").some(ch => corrects.includes(ch)) ? (q.max || 1) : 0;
+    return 0;
   }
   const n = parseFloat(raw);
   return isNaN(n) ? 0 : n;
 }
+
+/** Gemini 原生 Quiz 模式 Prompt（禁止 Canvas／純文字逐題） */
+function buildGeminiNativeQuizPrompt(opts) {
+  const o = opts || {};
+  const title = o.title || "化學溫習練習";
+  const studentLabel = o.studentLabel || "";
+  const contextLabel = o.contextLabel || "AI 溫習";
+  const level = o.level || "中";
+  const n = Math.max(1, parseInt(o.mcCount, 10) || 10);
+  const topics = (o.topics || []).filter(x => x && (x.id || x.topicId));
+  const syllabusText = o.syllabusText || "";
+  const extraNotes = o.extraNotes || "";
+  const useEng = o.lang === "ENG" || o.lang === "English" || o.lang === "英文";
+  const langName = useEng ? "English" : "繁體中文";
+  const normalized = topics.map(x => ({
+    id: String(x.id || x.topicId),
+    detail: x.detail || x.title || x.label || "",
+    pct: x.pct != null ? x.pct : null
+  }));
+  let allocCounts = [];
+  if (normalized.length) {
+    const base = Math.floor(n / normalized.length);
+    let rem = n - base * normalized.length;
+    normalized.forEach((_, i) => allocCounts.push(Math.max(1, base + (i < rem ? 1 : 0))));
+    const sum = allocCounts.reduce((a, b) => a + b, 0);
+    if (sum > n && normalized.length > n) allocCounts = normalized.map(() => null);
+  }
+  const rangeBlock = normalized.length
+    ? normalized.map((t, i) => {
+        const cnt = allocCounts[i];
+        const countHint = cnt != null ? `（分配約 ${cnt} 題）` : "";
+        const pct = t.pct != null ? `；掌握度約 ${t.pct}%` : "";
+        return `${i + 1}. [${t.id}] ${t.detail || t.id}${pct}${countHint}`;
+      }).join("\n")
+    : "（按相關課程範圍出由淺入深的鞏固題；每題題幹開頭仍須標明 topicId）";
+  return `請直接使用 Gemini 內建的【互動式測驗功能（Quiz 模式 / 測驗工具）】生成一份 ${n} 題選擇題測驗。
+
+⚠️ 系統執行限制（必須嚴格遵守）：
+1. 必須觸發並開啟 Gemini 原生的互動測驗介面（右上角顯示答對/答錯計數的原生測驗卡片）。
+2. 絕對不要使用 Canvas 編寫 HTML/JS/React 網頁應用程式（不要寫 code）。
+3. 絕對不要在對話框中以純文字逐題一問一答，也不要在對話框直接列出題目與答案。
+4. 測驗介面內的所有題目、選項（A/B/C/D）、提示與詳解，必須 100% 使用【${langName}】（化學式／單位符號除外）。
+
+【學生與考試資訊】
+- 測驗標題：${title}${studentLabel ? `（${studentLabel}）` : ""}
+- 科目：香港中學文憑試（HKDSE）化學科
+- 情境：${contextLabel}
+- 難度：${level}（由淺入深，適合基礎補底）
+- 題數：共 ${n} 題四選一選擇題（每題 4 個選項）
+
+【出題範圍與失分重點】（只考以下課題，每題題幹開頭必須標明 [topicId]，例如「[1.1] 下列哪項…」）：
+${rangeBlock}
+
+【課程大綱參考】
+${syllabusText || "（見上方課題與學習要求）"}
+
+【題目與解說要求】
+- 每題題幹最前方必須加上課題編號，格式為：[topicId]。
+- 為每個錯誤選項設計具針對性的「迷思解說（反饋）」，當學生選錯時清楚指出其概念迷思或常見計算／單位錯誤。
+- 在對話框開頭，只需用${useEng ? "英文" : "繁體中文"}寫一句簡短、鼓勵學生的說話，說明這是今日的「${contextLabel}」，然後立即啟動測驗介面。
+${extraNotes ? "\n" + extraNotes : ""}`;
+}
+
 function domainFromTopicId(tid) {
   if (!tid) return null;
   const s = String(tid);
@@ -1882,39 +1962,32 @@ function AiReviewView({ student, maps, scores, initialSource }) {
       : "- （尚未指定弱項：請按已選範圍出由淺入深鞏固練習）";
 
     const syllabus = getSyllabusTableText(picked.map(t => t.tid));
-    const outs = [];
-    if (extra.practice) outs.push("互動式練習（Canvas）");
-    if (extra.notes) outs.push("溫習筆記");
-    if (extra.ppt) outs.push("PPT 大綱");
-    if (extra.explainImg) outs.push("解說圖描述");
-
-    return `【身份】你是香港 DSE 化學科老師。
-
-【任務】為學生【${studentName}】（${student.class}-${student.num}）設計【AI 溫習】材料，針對其在「${srcLabel}」中的失分點。
-
-【已選${srcLabel}】
-${paperLines || "（未選）"}
-
-【學生弱項／課題（含不會的題目描述）】
-${weakLines}
-
-【課程大綱參考】
-${syllabus}
-
-【基本設定】
-- 語言：${lang}
-- 難度：${level}
-- 多項選擇題 (MC)：${mc} 題
-- 長題目 (LQ)：${lq} 題
-- 產出：${outs.join("、") || "練習"}
-- ★ 若包含練習：必須用 AI **Canvas（畫布）** 做成【互動式小測驗】——逐題顯示、學生作答後再給對錯與簡短解說；不要一次公開全部答案。
-
-【要求】
-1. 緊貼上述 topicId 與「不會的題目描述」，由淺入深。
-2. MC 附 4 選項；答錯指出迷思。
-3. 每題標明 topicId。
-4. 開頭用一句話鼓勵 ${studentName}。
-${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。\\n" : ""}${extra.ppt ? "5. 另附 PPT 大綱 8–12 頁（每頁標題+要點）。\\n" : ""}${extra.explainImg ? "5. 另附解說圖描述（每弱項一段，方便 AI 繪圖）。\\n" : ""}`;
+    const topicObjs = picked.map(t => ({
+      id: t.tid,
+      detail: `${t.label || ""}${t.weakQs && t.weakQs.length ? "；" + t.weakQs.slice(0,3).map(q => q.desc || q.id).join("；") : ""}`,
+      pct: t.pct
+    }));
+    const extras = [];
+    extras.push(`【已選${srcLabel}】\n` + (paperLines || "（未選）"));
+    extras.push("【學生弱項／課題】\n" + weakLines);
+    if (extra.notes) extras.push("【另請產出】溫習筆記：條列重點、公式、常見陷阱。");
+    if (extra.ppt) extras.push("【另請產出】PPT 大綱 8–12 頁。");
+    if (extra.explainImg) extras.push("【另請產出】解說圖描述（每弱項一段）。");
+    if (lq > 0) extras.push(`【附加】測驗結束後可以文字附上 ${lq} 題短答 LQ（勿用 Canvas）。`);
+    if (!extra.practice) {
+      return `【身份】你是香港 DSE 化學科老師。\n\n【任務】為【${studentName}】（${student.class}-${student.num}）設計 AI 溫習教材（不需測驗）。\n\n` + extras.join("\n\n") + `\n\n【課程大綱】\n${syllabus}`;
+    }
+    return buildGeminiNativeQuizPrompt({
+      title: `${srcLabel} AI 溫習`,
+      studentLabel: `${student.class}-${student.num} ${studentName}`,
+      contextLabel: "AI 溫習",
+      level,
+      mcCount: mc,
+      topics: topicObjs.length ? topicObjs : [{ id: "複習", detail: srcLabel + " 範圍" }],
+      syllabusText: syllabus,
+      lang: lang === "ENG" || lang === "English" || lang === "英文" ? "ENG" : "CHI",
+      extraNotes: extras.join("\n")
+    });
   };
 
   const copyAndOpenGemini = async () => {
@@ -2053,7 +2126,7 @@ ${extra.notes ? "5. 另附溫習筆記：條列重點、公式、常見陷阱。
           </label>
         </div>
         <div className="flex flex-wrap gap-2">
-          {[["practice", "練習（Canvas）"], ["notes", "筆記"], ["ppt", "PPT"], ["explainImg", "解說圖"]].map(([k, lab]) => (
+          {[["practice", "練習（Gemini Quiz）"], ["notes", "筆記"], ["ppt", "PPT"], ["explainImg", "解說圖"]].map(([k, lab]) => (
             <label key={k} className={`flex items-center gap-2 px-3 py-2 rounded-xl border-2 text-sm font-bold cursor-pointer bg-white ${extra[k] ? "border-violet-500" : "border-slate-200"}`}>
               <input type="checkbox" checked={!!extra[k]} onChange={e => setExtra(x => ({ ...x, [k]: e.target.checked }))} />
               {lab}
